@@ -1,0 +1,28 @@
+.env
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Local Streamlit state
+.streamlit/
+
+# Generated simulation runs (kept out of git; data lives on the runner's disk)
+runs/*/
+!runs/.gitkeep
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Claude Code project files
+.claude/

@@ -1,0 +1,5 @@
+# Normalize line endings to LF on checkout everywhere
+* text=auto eol=lf
+
+# Treat run data as binary to avoid diff noise
+runs/*.json binary
