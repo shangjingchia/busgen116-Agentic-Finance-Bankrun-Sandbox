@@ -76,6 +76,7 @@ def render_live_view() -> None:
     _TIMELINE_TYPES = {
         "rumor_published", "agent_acted",
         "social_signal_emitted", "rumor_truth_revealed",
+        "central_bank_acted",
     }
 
     # Emit a single card the first time each bank transitions to distressed/suspended
@@ -524,6 +525,33 @@ def _render_timeline_card(event: Dict, agent_states: Dict[str, Dict], bank_state
                 f'<span style="color:#2E4D28;font-weight:600">{ts_str} — Truth revealed: rumor was FALSE</span>'
                 f'<br>Bank A was solvent. Agents who withdrew paid fees unnecessarily.',
             )
+
+    elif etype == "central_bank_acted":
+        action = event.get("action", "do_nothing")
+        policy_type = event.get("policy_type", "llm")
+        reasoning = (event.get("reasoning", "") or "")
+        snippet = reasoning[:200].rsplit(" ", 1)[0] + "…" if len(reasoning) > 200 else reasoning
+        action_label = {
+            "announce_guarantee": "issued a deposit guarantee",
+            "inject_liquidity":   "injected emergency liquidity",
+            "do_nothing":         "monitored but did not intervene",
+        }.get(action, action.replace("_", " "))
+        policy_badge = "🤖 AI-powered CB" if policy_type == "llm" else "📋 Rule-based CB"
+        announcement = event.get("announcement_text", "")
+        st.markdown(
+            f'<div style="background:#FDF6E3;border-left:4px solid #B8860B;'
+            f'padding:0.65rem 0.9rem;border-radius:4px;margin:0.4rem 0;line-height:1.6">'
+            f'<span style="font-size:0.8rem;color:#7A6010">{ts_str}</span>'
+            f'<span style="float:right;font-size:0.8rem;color:#7A6010">{policy_badge}</span><br>'
+            f'<b>🏛 Central Bank</b> — <b>{action_label}</b>'
+            + (f'<br><span style="font-size:0.87rem;font-style:italic;color:#5A4E20">'
+               f'&#8220;{snippet}&#8221;</span>' if snippet else "")
+            + (f'<br><span style="font-size:0.85rem;background:#FFF8DC;padding:2px 6px;'
+               f'border-radius:3px;color:#3D2E00">{announcement}</span>'
+               if announcement else "")
+            + "</div>",
+            unsafe_allow_html=True,
+        )
 
     elif etype == "bank_state_transition":
         bank_id = event.get("bank_id", "").replace("_", " ").title()

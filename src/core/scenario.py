@@ -55,6 +55,20 @@ class AgentPopulationGroup:
 
 
 @dataclass
+class CentralBankConfig:
+    """Configuration for the Central Bank intervention agent.
+
+    policy_type="llm"        — makes a real LLM call to choose the intervention.
+    policy_type="rule_based" — fires a pre-programmed action at the trigger threshold.
+    """
+    policy_type: str = "llm"                          # "llm" | "rule_based"
+    trigger_threshold: float = 0.25                   # fraction of agents withdrawn before CB acts
+    model: str = "anthropic/claude-sonnet-4.5"        # model for LLM CB
+    rule_action: str = "announce_guarantee"           # fixed action for rule_based CB
+    rule_liquidity_fraction: float = 0.5              # for rule_based inject_liquidity
+
+
+@dataclass
 class Scenario:
     scenario_id: str
     name: str
@@ -67,6 +81,7 @@ class Scenario:
     social_signal_visibility: float = 1.0   # fraction of withdrawals visible on social feed
     seed: int = 42
     max_simulation_time: float = 3600.0     # 1 simulated hour
+    central_bank: Optional["CentralBankConfig"] = None  # None = no CB intervention
 
     # v2 hook: scenarios produced by the natural-language translator carry their source.
     source_natural_language: Optional[str] = None

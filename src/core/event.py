@@ -26,6 +26,9 @@ class EventType(str, Enum):
     BANK_RESERVE_UPDATED = "bank_reserve_updated"
     SOCIAL_SIGNAL_EMITTED = "social_signal_emitted"
     RUMOR_TRUTH_REVEALED = "rumor_truth_revealed"
+    CENTRAL_BANK_TRIGGERED = "central_bank_triggered"
+    CENTRAL_BANK_ACTED = "central_bank_acted"
+    POLICY_ANNOUNCED = "policy_announced"
 
 
 @dataclass
@@ -129,3 +132,42 @@ class RumorTruthRevealed(Event):
     bank_id: str = ""
     rumor_was_true: bool = False
     revealed_reserve_ratio: float = 0.0
+
+
+@dataclass
+class CentralBankTriggered(Event):
+    """The cascade crossed the CB trigger threshold — a CB decision is now pending."""
+
+    bank_id: str = ""
+    cascade_fraction: float = 0.0       # fraction of agents fully withdrawn at trigger time
+    bank_reserve_ratio: float = 0.0
+    bank_state: str = "healthy"
+    withdrawn_count: int = 0
+    total_agents: int = 0
+
+
+@dataclass
+class CentralBankActed(Event):
+    """The CB has executed a policy intervention."""
+
+    action: str = ""                    # "do_nothing" | "announce_guarantee" | "inject_liquidity"
+    bank_id: str = ""
+    reasoning: str = ""
+    announcement_text: str = ""         # for announce_guarantee
+    liquidity_amount: float = 0.0       # USD injected, for inject_liquidity
+    confidence: float = 0.0
+    policy_type: str = "llm"            # "llm" | "rule_based"
+    model_used: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+@dataclass
+class PolicyAnnounced(Event):
+    """A CB policy announcement broadcast to all agents via the news feed."""
+
+    bank_id: str = ""
+    announcement_text: str = ""
+    source: str = "central_bank"
+    cb_action_event_id: str = ""        # links back to the CentralBankActed event

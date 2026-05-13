@@ -230,6 +230,7 @@ class LLMClient:
         tool_schema: Dict[str, Any] = DECISION_TOOL_SCHEMA,
         force_tool: bool = True,
         cache_system_prompt: bool = True,  # accepted for compatibility; see module docstring
+        tool_validator=None,  # callable(dict)->dict; None → _validate_decision_tool_input
     ) -> LLMCallResult:
         """Make a structured decision call. Returns an ``LLMCallResult``."""
         del cache_system_prompt  # accepted-but-unused; OpenRouter prompt caching is a TODO
@@ -264,6 +265,7 @@ class LLMClient:
             max_tokens=max_tokens,
             tool_schema=tool_schema,
             force_tool=force_tool,
+            tool_validator=tool_validator,
         )
 
         self._cache[cache_key] = result
@@ -314,6 +316,7 @@ class LLMClient:
         max_tokens: int,
         tool_schema: Dict[str, Any],
         force_tool: bool,
+        tool_validator=None,
     ) -> LLMCallResult:
         kwargs: Dict[str, Any] = {
             "model": model,
@@ -340,6 +343,7 @@ class LLMClient:
                     response,
                     model=model,
                     expected_tool_name=tool_schema["function"]["name"],
+                    tool_validator=tool_validator,
                 )
             except ValueError as exc:
                 # Malformed tool call (missing fields, bad JSON, wrong tool name).
@@ -372,7 +376,7 @@ class LLMClient:
         assert last_err is not None
         raise last_err
 
-    def _extract_result(self, response: Any, *, model: str, expected_tool_name: str) -> LLMCallResult:
+    def _extract_result(self, response: Any, *, model: str, expected_tool_name: str, tool_validator=None) -> LLMCallResult:
         if not response.choices:
             raise ValueError(f"No choices in response: {response!r}")
         message = response.choices[0].message
@@ -432,8 +436,9 @@ class LLMClient:
             },
         }
 
+        validator = tool_validator if tool_validator is not None else _validate_decision_tool_input
         return LLMCallResult(
-            tool_input=_validate_decision_tool_input(tool_input),
+            tool_input=validator(tool_input),
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,

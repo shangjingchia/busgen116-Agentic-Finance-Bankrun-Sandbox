@@ -22,6 +22,12 @@ import streamlit as st
 # ---------------------------------------------------------------------------
 
 _SCENARIO_LABELS = {
+    # CB variants first — must match before their base-scenario IDs (startswith logic)
+    "rumor_high_false_llm_cb":  "Strong rumor — bank fine · AI Central Bank",
+    "rumor_high_false_rule_cb": "Strong rumor — bank fine · Rule-Based CB",
+    "rumor_high_true_llm_cb":   "Strong rumor — bank failing · AI Central Bank",
+    "rumor_high_true_rule_cb":  "Strong rumor — bank failing · Rule-Based CB",
+    # Base scenarios
     "rumor_high_false":     "Strong rumor — bank is actually fine",
     "rumor_high_true":      "Strong rumor — bank really is failing",
     "rumor_moderate_false": "Moderate rumor — bank is actually fine",
@@ -120,11 +126,19 @@ def render_configure() -> None:
                 _withdrew = _m.get("withdrawn_count", "—")
                 _total = _m.get("total_agents", 12)
                 _cascade = _m.get("cascade_triggered")
+                _cb_type = _m.get("cb_policy_type")
 
-                cols = st.columns(3)
-                cols[0].metric("Speed", _speed or "—")
-                cols[1].metric("Withdrew", f"{_withdrew} / {_total}")
-                cols[2].metric("Cascade", "🔥 yes" if _cascade else "✓ no")
+                if _cb_type:
+                    cols = st.columns(4)
+                    cols[0].metric("Speed", _speed or "—")
+                    cols[1].metric("CB", "🤖 AI" if _cb_type == "llm" else "📋 Rule")
+                    cols[2].metric("Withdrew", f"{_withdrew} / {_total}")
+                    cols[3].metric("Cascade", "🔥 yes" if _cascade else "✓ no")
+                else:
+                    cols = st.columns(3)
+                    cols[0].metric("Speed", _speed or "—")
+                    cols[1].metric("Withdrew", f"{_withdrew} / {_total}")
+                    cols[2].metric("Cascade", "🔥 yes" if _cascade else "✓ no")
 
                 if _desc:
                     st.markdown(
@@ -205,22 +219,60 @@ def render_configure() -> None:
                 ),
             )
 
+        # ── Central Bank toggle ───────────────────────────────────────────
+        st.markdown("")
+        with st.expander("🏛 Central Bank intervention (optional)", expanded=False):
+            enable_cb = st.checkbox("Enable Central Bank", value=False)
+            if enable_cb:
+                cb_col1, cb_col2 = st.columns(2)
+                with cb_col1:
+                    cb_type_label = st.radio(
+                        "Policy type",
+                        ["🤖 AI-powered (LLM)", "📋 Rule-based (fixed threshold)"],
+                        help=(
+                            "**AI-powered**: the CB makes a real LLM call and chooses "
+                            "the intervention in context. "
+                            "**Rule-based**: fires a pre-configured guarantee announcement "
+                            "when the threshold is crossed, without reasoning."
+                        ),
+                    )
+                with cb_col2:
+                    cb_threshold = st.slider(
+                        "Trigger threshold",
+                        min_value=0.10, max_value=0.60,
+                        value=0.25, step=0.05,
+                        help="Fraction of agents who must fully withdraw before the CB acts.",
+                    )
+                    st.caption(f"CB fires at {int(cb_threshold * 100)}% withdrawn")
+            else:
+                enable_cb = False
+
         st.markdown("")
         btn_col, note_col = st.columns([1, 3])
         with btn_col:
             run_pressed = st.button("▶ Run", type="primary", use_container_width=True)
         with note_col:
-            st.caption(f"12 agents · {int(round(credibility * 100))}% credibility · {speed_label.lower()}")
+            cb_note = " · CB enabled" if enable_cb else ""
+            st.caption(f"12 agents · {int(round(credibility * 100))}% credibility · {speed_label.lower()}{cb_note}")
 
         if run_pressed:
             import random as _random
-            from src.core.scenario import ScenarioSpeed
+            from src.core.scenario import CentralBankConfig, ScenarioSpeed
 
             s = copy.deepcopy(scenario_template)
             s.rumors[0].credibility = credibility
             s.social_signal_visibility = social_visibility
             s.seed = _random.randint(0, 9999)
             s.speed = ScenarioSpeed.AI_SPEED if speed_label == "AI Speed" else ScenarioSpeed.HUMAN_SPEED
+
+            if enable_cb:
+                s.central_bank = CentralBankConfig(
+                    policy_type="llm" if "AI" in cb_type_label else "rule_based",
+                    trigger_threshold=cb_threshold,
+                    model="anthropic/claude-sonnet-4.5",
+                )
+            else:
+                s.central_bank = None
 
             _run_and_store(s)
 

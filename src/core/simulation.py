@@ -47,8 +47,11 @@ from src.core.event import (
     AgentDecisionTriggered,
     AgentObserved,
     BankReserveUpdated,
+    CentralBankActed,
+    CentralBankTriggered,
     Event,
     EventType,
+    PolicyAnnounced,
     RumorPublished,
     RumorTruthRevealed,
     SocialSignalEmitted,
@@ -64,7 +67,11 @@ from src.core.scenario import (
 from src.decisions.decision import DecisionContext, make_decision
 from src.decisions.llm_client import LLMClient
 from src.information.feed import Feed
-from src.information.observation import render_rumor_observation, render_social_observation
+from src.information.observation import (
+    render_policy_observation,
+    render_rumor_observation,
+    render_social_observation,
+)
 from src.information.rumor import rumor_config_to_event
 
 logger = logging.getLogger(__name__)
@@ -92,6 +99,9 @@ class RunMetrics:
     total_events: int
     total_llm_calls: int
     total_cost_usd: float
+    cb_policy_type: Optional[str] = None   # "llm" | "rule_based" | None
+    cb_action: Optional[str] = None        # action taken by the CB
+    cb_triggered_at: Optional[float] = None  # simulation time when CB was triggered
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -106,6 +116,9 @@ class RunMetrics:
             "total_events": self.total_events,
             "total_llm_calls": self.total_llm_calls,
             "total_cost_usd": self.total_cost_usd,
+            "cb_policy_type": self.cb_policy_type,
+            "cb_action": self.cb_action,
+            "cb_triggered_at": self.cb_triggered_at,
         }
 
 
@@ -114,6 +127,7 @@ class RunResult:
     run_id: str
     scenario_id: str
     scenario_name: str
+    scenario_description: str
     speed: str
     seed: int
     events: List[Dict[str, Any]]
@@ -130,6 +144,7 @@ class RunResult:
             "run_id": self.run_id,
             "scenario_id": self.scenario_id,
             "scenario_name": self.scenario_name,
+            "scenario_description": self.scenario_description,
             "speed": self.speed,
             "seed": self.seed,
             "events": self.events,
@@ -209,6 +224,17 @@ class SimulationEngine:
 
         self._feed = Feed(scenario=scenario, agents=agents, rng=self._rng)
 
+        # Central Bank agent (optional)
+        self._cb_triggered: bool = False
+        self._cb_agent = None
+        self._cb_initial_reserves: Dict[str, float] = {bid: b.reserves for bid, b in banks.items()}
+        self._cb_policy_type: Optional[str] = None
+        self._cb_action: Optional[str] = None
+        self._cb_triggered_at: Optional[float] = None
+        if scenario.central_bank is not None:
+            from src.core.central_bank import CentralBankAgent
+            self._cb_agent = CentralBankAgent(scenario.central_bank, llm_client)
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -235,7 +261,8 @@ class SimulationEngine:
                 batch.append(heapq.heappop(self._queue))
 
             decisions = [e for e in batch if isinstance(e, AgentDecisionTriggered)]
-            others = [e for e in batch if not isinstance(e, AgentDecisionTriggered)]
+            cb_decisions = [e for e in batch if isinstance(e, CentralBankTriggered)]
+            others = [e for e in batch if not isinstance(e, (AgentDecisionTriggered, CentralBankTriggered))]
 
             # Process non-decision events first (may push new events at same time)
             for event in others:
@@ -243,7 +270,19 @@ class SimulationEngine:
                 for ne in self._handle_sync(event, sim_time):
                     self._schedule(ne)
 
-            # Gather all decision events at this timestamp in parallel
+            # CB decision fires before agent decisions so any CB announcement can be
+            # routed to agents who haven't yet committed to a decision.
+            if cb_decisions:
+                for e in cb_decisions:
+                    self._log(e)
+                cb_lists = await asyncio.gather(
+                    *[self._handle_cb_decision(e, sim_time) for e in cb_decisions]
+                )
+                for nl in cb_lists:
+                    for ne in nl:
+                        self._schedule(ne)
+
+            # Gather all agent decision events at this timestamp in parallel
             if decisions:
                 for e in decisions:
                     self._log(e)
@@ -279,8 +318,11 @@ class SimulationEngine:
             return self._handle_agent_acted(event, sim_time)
         elif isinstance(event, SocialSignalEmitted):
             return self._handle_social_signal_emitted(event, sim_time)
-        # WithdrawalProcessed and BankReserveUpdated are already handled inside
-        # _handle_agent_acted; they only appear in the log for the dashboard.
+        elif isinstance(event, CentralBankActed):
+            return self._handle_central_bank_acted(event, sim_time)
+        elif isinstance(event, PolicyAnnounced):
+            return self._handle_policy_announced(event, sim_time)
+        # WithdrawalProcessed and BankReserveUpdated appear in the log only.
         return []
 
     def _handle_rumor_published(self, event: RumorPublished) -> List[Event]:
@@ -341,6 +383,23 @@ class SimulationEngine:
                         bank_id=original.bank_id,
                     )
                     new_events.append(trigger)
+
+        elif isinstance(original, PolicyAnnounced):
+            # CB announcement: add to pending observations and trigger a re-decision
+            # for agents who have not yet fully withdrawn.
+            obs_str = render_policy_observation(original)
+            self._pending_obs[event.agent_id].append(obs_str)
+            if agent.state != AgentState.WITHDRAWN:
+                delay = self._decision_delay()
+                trigger = AgentDecisionTriggered(
+                    event_type=EventType.AGENT_DECISION_TRIGGERED,
+                    timestamp=event.timestamp + delay,
+                    agent_id=event.agent_id,
+                    trigger_reason="policy_announced",
+                    triggering_event_id=event.event_id,
+                    bank_id=original.bank_id,
+                )
+                new_events.append(trigger)
 
         return new_events
 
@@ -408,6 +467,23 @@ class SimulationEngine:
             agent.state = AgentState.HAS_DECIDED
             self._partially_withdrawn_agents.add(agent.agent_id)
 
+        # Central Bank trigger: fires once when withdrawals cross the CB threshold
+        if self._cb_agent is not None and not self._cb_triggered:
+            frac = len(self._withdrawn_agents) / max(len(self._agents), 1)
+            if frac >= self._scenario.central_bank.trigger_threshold:
+                self._cb_triggered = True
+                cb_bank = self._banks.get(event.bank_id)
+                new_events.append(CentralBankTriggered(
+                    event_type=EventType.CENTRAL_BANK_TRIGGERED,
+                    timestamp=event.timestamp,
+                    bank_id=event.bank_id,
+                    cascade_fraction=frac,
+                    bank_reserve_ratio=cb_bank.reserve_ratio() if cb_bank else 0.0,
+                    bank_state=cb_bank.state.value if cb_bank else "healthy",
+                    withdrawn_count=len(self._withdrawn_agents),
+                    total_agents=len(self._agents),
+                ))
+
         # Schedule audit events
         wp = WithdrawalProcessed(
             event_type=EventType.WITHDRAWAL_PROCESSED,
@@ -451,6 +527,96 @@ class SimulationEngine:
         self._event_by_id[event.event_id] = event
         source_agent = self._agents.get(event.source_agent_id)
         return self._feed.route_social_signal(event, source_agent)
+
+    def _handle_central_bank_acted(self, event: CentralBankActed, sim_time: float) -> List[Event]:
+        """Apply the CB's chosen policy intervention."""
+        new_events: List[Event] = []
+
+        # Track CB outcome for metrics
+        self._cb_policy_type = event.policy_type
+        self._cb_action = event.action
+        self._cb_triggered_at = event.timestamp
+
+        bank = self._banks.get(event.bank_id)
+
+        if event.action == "inject_liquidity" and bank is not None and event.liquidity_amount > 0:
+            bank.reserves += event.liquidity_amount
+            bru = BankReserveUpdated(
+                event_type=EventType.BANK_RESERVE_UPDATED,
+                timestamp=event.timestamp,
+                bank_id=event.bank_id,
+                new_reserves=bank.reserves,
+                new_reserve_ratio=bank.reserve_ratio(),
+                new_state=bank._recompute_state().value,
+            )
+            new_events.append(bru)
+            logger.info(
+                "CB injected $%.0f into %s → reserve ratio %.1f%%",
+                event.liquidity_amount, event.bank_id, bank.reserve_ratio() * 100,
+            )
+
+        elif event.action == "announce_guarantee" and event.announcement_text:
+            announcement = PolicyAnnounced(
+                event_type=EventType.POLICY_ANNOUNCED,
+                timestamp=event.timestamp,
+                bank_id=event.bank_id,
+                announcement_text=event.announcement_text,
+                source="central_bank",
+                cb_action_event_id=event.event_id,
+            )
+            new_events.append(announcement)
+            logger.info("CB issued guarantee for %s", event.bank_id)
+
+        return new_events
+
+    def _handle_policy_announced(self, event: PolicyAnnounced, sim_time: float) -> List[Event]:
+        """Route a CB policy announcement to all agents via the news feed."""
+        self._event_by_id[event.event_id] = event
+        return self._feed.route_policy_announcement(event)
+
+    # ------------------------------------------------------------------
+    # Async CB decision handler
+    # ------------------------------------------------------------------
+
+    async def _handle_cb_decision(
+        self, event: CentralBankTriggered, sim_time: float
+    ) -> List[Event]:
+        """Run the CB decision (LLM call or rule-based) and return a CentralBankActed event."""
+        result = await asyncio.to_thread(
+            self._cb_agent.decide,
+            bank_id=event.bank_id,
+            bank_state=event.bank_state,
+            bank_reserve_ratio=event.bank_reserve_ratio,
+            cascade_fraction=event.cascade_fraction,
+            withdrawn_count=event.withdrawn_count,
+            total_agents=event.total_agents,
+            sim_time=event.timestamp,
+        )
+
+        initial_reserves = self._cb_initial_reserves.get(event.bank_id, 0.0)
+        liquidity_amount = initial_reserves * result.liquidity_fraction
+
+        acted = CentralBankActed(
+            event_type=EventType.CENTRAL_BANK_ACTED,
+            timestamp=event.timestamp,
+            action=result.action,
+            bank_id=event.bank_id,
+            reasoning=result.reasoning,
+            announcement_text=result.announcement_text,
+            liquidity_amount=liquidity_amount,
+            confidence=result.confidence,
+            policy_type=self._scenario.central_bank.policy_type,
+            model_used=result.model_used,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            cost_usd=result.cost_usd,
+        )
+
+        logger.info(
+            "CB decision: action=%s policy=%s cost=$%.4f",
+            result.action, self._scenario.central_bank.policy_type, result.cost_usd,
+        )
+        return [acted]
 
     # ------------------------------------------------------------------
     # Async decision handler (LLM call)
@@ -678,12 +844,16 @@ class SimulationEngine:
             total_events=len(self._event_log),
             total_llm_calls=summary.total_calls,
             total_cost_usd=summary.total_cost_usd,
+            cb_policy_type=self._cb_policy_type,
+            cb_action=self._cb_action,
+            cb_triggered_at=self._cb_triggered_at,
         )
 
         return RunResult(
             run_id=str(uuid.uuid4()),
             scenario_id=self._scenario.scenario_id,
             scenario_name=self._scenario.name,
+            scenario_description=self._scenario.description,
             speed=self._scenario.speed.value,
             seed=self._scenario.seed,
             events=[e.to_dict() for e in self._event_log],

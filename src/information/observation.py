@@ -8,7 +8,7 @@ the agent's decision prompt under "What you have just observed."
 
 from __future__ import annotations
 
-from src.core.event import RumorPublished, SocialSignalEmitted
+from src.core.event import PolicyAnnounced, RumorPublished, SocialSignalEmitted
 
 
 def render_rumor_observation(rumor: RumorPublished) -> str:
@@ -31,6 +31,12 @@ def render_social_observation(signal: SocialSignalEmitted, source_archetype: str
     return (
         f"[Social feed] A {archetype_label} just {action_phrase} "
         f"from {signal.bank_id}."
+    )
+
+
+def render_policy_observation(announcement: PolicyAnnounced) -> str:
+    return (
+        f"[CENTRAL BANK — OFFICIAL ANNOUNCEMENT] {announcement.announcement_text}"
     )
 
 
