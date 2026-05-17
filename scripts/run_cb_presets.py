@@ -78,10 +78,10 @@ async def run_cb_comparison() -> None:
             print(f"  ERROR: {exc}")
             continue
 
-    print(f"\n✓ CB comparison runs complete. Saved to {RUNS_DIR}/")
+    print(f"\nDone. CB comparison runs saved to {RUNS_DIR}/")
     print(
         "  Compare using the Findings page in the dashboard, "
-        "or load each run individually from the Configure → Load tab."
+        "or load each run individually from the Configure -> Load tab."
     )
 
 

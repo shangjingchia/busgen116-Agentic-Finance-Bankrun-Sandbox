@@ -467,12 +467,18 @@ class SimulationEngine:
             agent.state = AgentState.HAS_DECIDED
             self._partially_withdrawn_agents.add(agent.agent_id)
 
-        # Central Bank trigger: fires once when withdrawals cross the CB threshold
+        # Central Bank trigger: fires once when deposit-fraction-withdrawn crosses threshold.
+        # Uses reserves-depleted fraction (partial withdrawals count) rather than agent count,
+        # which only tracks fully-withdrawn agents and misses the real stress signal.
         if self._cb_agent is not None and not self._cb_triggered:
-            frac = len(self._withdrawn_agents) / max(len(self._agents), 1)
+            cb_bank = self._banks.get(event.bank_id)
+            initial_res = self._cb_initial_reserves.get(event.bank_id, 1.0)
+            if cb_bank is not None and initial_res > 0:
+                frac = max(0.0, 1.0 - cb_bank.reserves / initial_res)
+            else:
+                frac = len(self._withdrawn_agents) / max(len(self._agents), 1)
             if frac >= self._scenario.central_bank.trigger_threshold:
                 self._cb_triggered = True
-                cb_bank = self._banks.get(event.bank_id)
                 new_events.append(CentralBankTriggered(
                     event_type=EventType.CENTRAL_BANK_TRIGGERED,
                     timestamp=event.timestamp,
@@ -957,7 +963,7 @@ async def run_scenario(
     if runs_dir is not None:
         path = result.save(runs_dir)
         if verbose:
-            print(f"  Run saved → {path}\n")
+            print(f"  Run saved -> {path}\n")
 
     return result
 
