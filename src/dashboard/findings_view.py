@@ -76,7 +76,11 @@ _SVB_NOTE = (
 def _load_runs() -> Tuple[List[Dict], List[Dict], Dict[str, Dict]]:
     preset, sweep = [], []
     cb_by_sid: Dict[str, Dict] = {}
-    _CB_SIDS = {"rumor_high_false", "rumor_high_false_llm_cb", "rumor_high_false_rule_cb"}
+    # CB variants for the flat no-cascade scenario
+    _FLAT_CB_SIDS = {"rumor_high_false", "rumor_high_false_llm_cb", "rumor_high_false_rule_cb"}
+    # CB variants for the cascading scenario (preferred — more interesting)
+    _CASCADE_CB_SIDS = {"sweep_false_045", "sweep_false_045_llm_cb", "sweep_false_045_rule_cb"}
+    _ALL_CB_SIDS = _FLAT_CB_SIDS | _CASCADE_CB_SIDS
     for p in sorted(RUNS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
@@ -84,12 +88,17 @@ def _load_runs() -> Tuple[List[Dict], List[Dict], Dict[str, Dict]]:
             speed = d.get("speed", "")
             if not sid or speed not in ("ai", "human"):
                 continue
-            if sid.startswith("sweep_"):
+            is_cb_variant = "_cb" in sid
+            if sid in _ALL_CB_SIDS and speed == "ai":
+                cb_by_sid[sid] = d  # keep latest per scenario_id
+                if not is_cb_variant:
+                    # baseline also goes into sweep or preset as normal
+                    if sid.startswith("sweep_"):
+                        sweep.append(d)
+                    else:
+                        preset.append(d)
+            elif sid.startswith("sweep_"):
                 sweep.append(d)
-            elif sid in _CB_SIDS and speed == "ai":
-                cb_by_sid[sid] = d  # keep latest
-                if "_cb" not in sid:
-                    preset.append(d)
             else:
                 preset.append(d)
         except Exception:
@@ -677,113 +686,146 @@ def _finding_outcome_quality(preset: List[Dict]) -> None:
 
 
 def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
-    baseline = cb_runs.get("rumor_high_false")
-    llm_cb   = cb_runs.get("rumor_high_false_llm_cb")
-    rule_cb  = cb_runs.get("rumor_high_false_rule_cb")
+    # Prefer cascade scenario (45% credibility — cascade actually fires) over flat scenario
+    baseline = cb_runs.get("sweep_false_045") or cb_runs.get("rumor_high_false")
+    llm_cb   = cb_runs.get("sweep_false_045_llm_cb") or cb_runs.get("rumor_high_false_llm_cb")
+    rule_cb  = cb_runs.get("sweep_false_045_rule_cb") or cb_runs.get("rumor_high_false_rule_cb")
+
+    using_cascade = "sweep_false_045" in cb_runs
 
     if not (baseline and (llm_cb or rule_cb)):
         st.info(
-            "Run `python scripts/run_cb_presets.py` to generate the three Central Bank "
+            "Run `python scripts/run_cascade_cb.py` to generate the three Central Bank "
             "comparison scenarios, then reload this page."
         )
         return
 
-    st.subheader("Finding 5 — Central Bank intervention can stop the cascade — but only at AI speed")
-    st.markdown(
-        "We added a Central Bank agent that monitors the cascade in real time. "
-        "Two variants: an **AI-powered CB** that makes a live LLM call to choose its intervention "
-        "(guarantee, liquidity injection, or do-nothing), and a **rule-based CB** that fires "
-        "a fixed response when 25% of agents have withdrawn — representing a regulatory body "
-        "that has not yet adopted AI-speed decision-making. "
-        "The chart compares final withdrawal fractions across all three conditions."
-    )
+    bm = _metrics(baseline)
+    rm = _metrics(rule_cb) if rule_cb else None
+    lm = _metrics(llm_cb) if llm_cb else None
 
-    labels, values, colors = [], [], []
+    rule_cb_m = (rule_cb or {}).get("metrics", {})
+    llm_cb_m  = (llm_cb  or {}).get("metrics", {})
 
-    if baseline:
-        bm = _metrics(baseline)
-        labels.append("No intervention\n(baseline)")
-        values.append(bm["withdrawal_fraction"] * 100)
-        colors.append("#E15759")
+    # Build headline: how many agents withdrew in each condition
+    b_withdrew  = bm["n_withdrew"]
+    r_withdrew  = rm["n_withdrew"] if rm else None
+    l_withdrew  = lm["n_withdrew"] if lm else None
+    b_t50       = baseline.get("metrics", {}).get("time_to_50pct_withdrawn")
+    cascade_str = f"**{b_withdrew}/12** agents withdrew in {b_t50:.0f}s" if b_t50 else f"**{b_withdrew}/12** agents withdrew"
 
-    if rule_cb:
-        rm = _metrics(rule_cb)
+    if using_cascade:
+        title = "Finding 5 — An AI regulator can stop a cascade. A rule-based one cannot react in time."
+        lead = (
+            f"In the cascading scenario (45% credibility false alarm), {cascade_str} with no intervention. "
+            "We then added two Central Bank agents watching the same simulation in real time. "
+            "The **AI-powered CB** makes a live LLM call — reads the cascade dynamics, "
+            "weighs moral hazard against systemic risk, and chooses an intervention. "
+            "The **rule-based CB** fires a fixed response when the deposit-fraction threshold is crossed, "
+            "no reasoning, no context — representing a regulator that has not adopted AI-speed judgment."
+        )
+    else:
+        title = "Finding 5 — Central Bank intervention: AI judgment vs. fixed rules"
+        lead = (
+            "We added a Central Bank agent that monitors the cascade in real time. "
+            "Two variants: an **AI-powered CB** that makes a live LLM call to choose its intervention "
+            "(guarantee, liquidity injection, or do-nothing), and a **rule-based CB** that fires "
+            "a fixed response when 25% of deposits have left. "
+            "The chart compares final withdrawal fractions across all three conditions."
+        )
+
+    st.subheader(title)
+    st.markdown(lead)
+
+    # ── Bar chart ──────────────────────────────────────────────────────────
+    labels, values, colors, agent_counts = [], [], [], []
+
+    labels.append("No intervention\n(baseline)")
+    values.append(bm["withdrawal_fraction"] * 100)
+    colors.append("#E15759")
+    agent_counts.append(bm["n_withdrew"])
+
+    if rule_cb and rm:
         labels.append("Rule-based CB\n(fixed threshold)")
         values.append(rm["withdrawal_fraction"] * 100)
         colors.append("#F1A340")
+        agent_counts.append(rm["n_withdrew"])
 
-    if llm_cb:
-        lm = _metrics(llm_cb)
+    if llm_cb and lm:
         labels.append("AI-powered CB\n(LLM judgment)")
         values.append(lm["withdrawal_fraction"] * 100)
         colors.append("#4A6741")
+        agent_counts.append(lm["n_withdrew"])
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=labels, y=values, marker_color=colors,
-        text=[f"{v:.0f}%" for v in values], textposition="outside",
+        text=[f"{v:.0f}%<br><span style='font-size:11px'>({ac}/12 agents)</span>"
+              for v, ac in zip(values, agent_counts)],
+        textposition="outside",
         width=0.4,
     ))
-
-    # CB trigger line
-    if baseline:
-        bm = _metrics(baseline)
-        n = bm["n_total"]
-        cb_frac = 0.25 * 100
-        fig.add_hline(
-            y=cb_frac, line_dash="dot", line_color="#B8860B", line_width=1.5,
-            annotation_text="CB trigger threshold (25%)",
-            annotation_position="right", annotation_font_size=10,
-            annotation_font_color="#7A6010",
-        )
-
+    fig.add_hline(
+        y=25, line_dash="dot", line_color="#B8860B", line_width=1.5,
+        annotation_text="CB trigger (25% deposits withdrawn)",
+        annotation_position="top right", annotation_font_size=10,
+        annotation_font_color="#7A6010",
+    )
     fig.update_layout(
-        yaxis=dict(title="% of Bank A deposits withdrawn", ticksuffix="%", range=[0, 115]),
-        height=300, margin=dict(l=0, r=140, t=10, b=0),
+        yaxis=dict(title="% of Bank A deposits withdrawn", ticksuffix="%", range=[0, 120]),
+        height=320, margin=dict(l=0, r=160, t=10, b=0),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # ── Detail cards ────────────────────────────────────────────────────────
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if baseline and rule_cb:
-            bm = _metrics(baseline)
-            rm = _metrics(rule_cb)
-            delta = bm["withdrawal_fraction"] - rm["withdrawal_fraction"]
-            rule_cb_m = rule_cb.get("metrics", {})
-            cb_at = rule_cb_m.get("cb_triggered_at")
+        if rule_cb and rm:
+            cb_at    = rule_cb_m.get("cb_triggered_at")
             cb_action = rule_cb_m.get("cb_action", "—")
+            delta_agents = bm["n_withdrew"] - rm["n_withdrew"]
+            delta_frac   = bm["withdrawal_fraction"] - rm["withdrawal_fraction"]
             st.markdown(
                 f'<div style="background:#FDF6E3;border-left:4px solid #B8860B;'
                 f'border-radius:6px;padding:0.8rem 1rem">'
                 f'<div style="font-weight:700;margin-bottom:0.3rem">Rule-based CB</div>'
-                f'<div style="font-size:0.88rem;line-height:1.5">'
+                f'<div style="font-size:0.88rem;line-height:1.6">'
                 f'Fired <b>{cb_action.replace("_"," ")}</b>'
-                + (f' at T+{cb_at:.0f}s' if cb_at else "")
-                + f'<br>Reduced withdrawals by <b>{delta:.0%}</b> vs. baseline. '
-                f'No reasoning — same action regardless of context.</div></div>',
+                + (f' at T+{cb_at:.1f}s' if cb_at else ' — threshold not reached')
+                + f'<br>Agents stopped: <b>{delta_agents:+d}</b> '
+                f'({delta_frac:+.0%} deposit fraction)<br>'
+                f'No reasoning — identical response regardless of context.'
+                f'</div></div>',
                 unsafe_allow_html=True,
             )
 
     with col2:
-        if baseline and llm_cb:
-            bm = _metrics(baseline)
-            lm = _metrics(llm_cb)
-            delta = bm["withdrawal_fraction"] - lm["withdrawal_fraction"]
-            llm_cb_m = llm_cb.get("metrics", {})
-            cb_at = llm_cb_m.get("cb_triggered_at")
+        if llm_cb and lm:
+            cb_at     = llm_cb_m.get("cb_triggered_at")
             cb_action = llm_cb_m.get("cb_action", "—")
+            delta_agents = bm["n_withdrew"] - lm["n_withdrew"]
+            delta_frac   = bm["withdrawal_fraction"] - lm["withdrawal_fraction"]
+            # Pull reasoning snippet from events
+            reasoning_snippet = ""
+            for e in llm_cb.get("events", []):
+                if e.get("event_type") == "central_bank_acted" and e.get("reasoning"):
+                    reasoning_snippet = e["reasoning"][:160] + "…"
+                    break
             st.markdown(
                 f'<div style="background:#EEF3EE;border-left:4px solid #4A6741;'
                 f'border-radius:6px;padding:0.8rem 1rem">'
                 f'<div style="font-weight:700;margin-bottom:0.3rem">AI-powered CB</div>'
-                f'<div style="font-size:0.88rem;line-height:1.5">'
+                f'<div style="font-size:0.88rem;line-height:1.6">'
                 f'Chose <b>{cb_action.replace("_"," ")}</b>'
-                + (f' at T+{cb_at:.0f}s' if cb_at else "")
-                + f'<br>Reduced withdrawals by <b>{delta:.0%}</b> vs. baseline. '
-                f'Read context, weighed moral hazard, committed to one action.</div></div>',
+                + (f' at T+{cb_at:.1f}s' if cb_at else ' — threshold not reached')
+                + f'<br>Agents stopped: <b>{delta_agents:+d}</b> '
+                f'({delta_frac:+.0%} deposit fraction)'
+                + (f'<br><span style="font-style:italic;color:#444;font-size:0.83rem">"{reasoning_snippet}"</span>'
+                   if reasoning_snippet else '')
+                + '</div></div>',
                 unsafe_allow_html=True,
             )
 
@@ -791,11 +833,13 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
         st.markdown(
             '<div style="background:#F0F4FF;border-left:4px solid #4E79A7;'
             'border-radius:6px;padding:0.8rem 1rem">'
-            '<div style="font-weight:700;margin-bottom:0.3rem">The speed constraint</div>'
-            '<div style="font-size:0.88rem;line-height:1.5">'
-            'Both CBs intervened in seconds — possible only because they operate at '
-            'machine speed. A human-reviewed intervention process (hours to days) '
-            'would arrive after the cascade was already complete.'
+            '<div style="font-weight:700;margin-bottom:0.3rem">The window problem</div>'
+            '<div style="font-size:0.88rem;line-height:1.6">'
+            'The cascade window in AI-speed runs closes in <b>seconds</b>. '
+            'Both CBs fire in time <i>only because they also run at machine speed</i>. '
+            'A human-reviewed CB process — committee deliberation, legal sign-off, '
+            'staged communication — operates on timescales of hours to days. '
+            'By then the cascade is over.'
             '</div></div>',
             unsafe_allow_html=True,
         )
@@ -804,18 +848,15 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
         '<div style="background:#EDE8DF;border-left:5px solid #8A4E1A;'
         'border-radius:6px;padding:1rem 1.2rem;margin-top:1rem">'
         '<div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem;color:#5C3010">'
-        'Policy implication — in an AI-delegated financial system, regulators must also move at AI speed'
+        'Policy implication — the regulator speed gap'
         '</div>'
         '<div style="font-size:0.9rem;line-height:1.7">'
-        'The AI-vs-rule-based comparison reveals the second-order problem: '
-        'AI delegation creates crises that move faster than human-speed regulatory response. '
-        'The cascade window in our simulation closes in seconds. '
-        'Existing CB intervention frameworks — which involve human review, committee deliberation, '
-        'and staged communication — operate on timescales of hours to days.<br><br>'
-        'Closing this gap requires either: (1) slowing down AI-delegated decisions through '
-        'mandatory wait periods or circuit breakers, or (2) deploying AI-speed CB monitoring '
-        'and response systems. Neither is currently being seriously discussed by financial regulators. '
-        'This simulation provides a concrete, observable demonstration of why the question is urgent.'
+        'AI delegation compresses cascade timescales from hours to seconds. '
+        'Existing regulatory frameworks were not designed for this. '
+        'The question is not whether AI CB agents are a good idea — '
+        'it\'s whether the alternative (human-reviewed responses) can possibly keep up. '
+        'This simulation provides a concrete, observable case study: '
+        'a cascade started and ended before any human review process could begin.'
         '</div></div>',
         unsafe_allow_html=True,
     )

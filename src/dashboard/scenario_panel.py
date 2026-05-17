@@ -57,8 +57,14 @@ def _format_run_stem(stem: str) -> str:
         parts = stem.split("_")
         cred = next((p for p in parts[2:] if p.isdigit() and len(p) == 3), "")
         cred_label = f"Credibility sweep {int(cred)}%" if cred else "Credibility sweep"
+        cb_badge = (
+            " · AI Central Bank" if "_llm_cb" in stem
+            else " · Rule-Based CB" if "_rule_cb" in stem
+            else ""
+        )
         speed = "AI speed" if "_ai_" in stem else "Human speed" if "_human_" in stem else ""
-        return f"{cred_label}  ·  {speed}" if speed else cred_label
+        parts_out = [cred_label + cb_badge, speed]
+        return "  ·  ".join(p for p in parts_out if p)
 
     return stem
 
