@@ -685,6 +685,14 @@ def _finding_outcome_quality(preset: List[Dict]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _cb_trigger_event(run: Dict) -> Dict:
+    """Return the first central_bank_triggered event payload, or empty dict."""
+    for e in run.get("events", []):
+        if e.get("event_type") == "central_bank_triggered":
+            return e
+    return {}
+
+
 def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     # Prefer cascade scenario (45% credibility — cascade actually fires) over flat scenario
     baseline = cb_runs.get("sweep_false_045") or cb_runs.get("rumor_high_false")
@@ -715,11 +723,89 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     b_full = _full_exits(baseline)
     r_full = _full_exits(rule_cb) if rule_cb else None
     l_full = _full_exits(llm_cb) if llm_cb else None
+    n_total = baseline.get("metrics", {}).get("total_agents", 12)
     b_t50  = baseline.get("metrics", {}).get("time_to_50pct_withdrawn")
     cascade_str = (
         f"**{b_full}/12** agents fully exited the bank in {b_t50:.0f}s"
         if b_t50 else f"**{b_full}/12** agents fully exited the bank"
     )
+
+    # ── Headline metric ───────────────────────────────────────────────────────
+    # Pick the best CB exits count (prefer llm_cb when available)
+    best_cb_full = l_full if l_full is not None else r_full
+    if best_cb_full is not None and best_cb_full < b_full:
+        pct_reduction = (b_full - best_cb_full) / b_full * 100
+    else:
+        pct_reduction = 0.0
+
+    llm_trig  = _cb_trigger_event(llm_cb)  if llm_cb  else {}
+    rule_trig = _cb_trigger_event(rule_cb) if rule_cb else {}
+
+    llm_reserves  = llm_trig.get("bank_reserve_ratio")
+    rule_reserves = rule_trig.get("bank_reserve_ratio")
+    llm_state     = llm_trig.get("bank_state", "")
+    rule_state    = rule_trig.get("bank_state", "")
+    llm_action    = llm_cb_m.get("cb_action", "—")  if llm_cb  else None
+    rule_action   = rule_cb_m.get("cb_action", "—") if rule_cb else None
+
+    ai_res_str   = f"{llm_reserves:.0%} reserves ({llm_state})"   if llm_reserves  is not None else "—"
+    rule_res_str = f"{rule_reserves:.0%} reserves ({rule_state})" if rule_reserves is not None else "—"
+    ai_action_str   = (llm_action  or "—").replace("_", " ")
+    rule_action_str = (rule_action or "—").replace("_", " ")
+
+    # Determine correctness labels based on action and bank state
+    ai_correct   = "✓ correct" if llm_action  == "do_nothing" and llm_state  in ("healthy", "")  else ""
+    rule_correct = "✗ blind"   if rule_action != "do_nothing" else ""
+
+    st.markdown(
+        f"""
+<div style="background:linear-gradient(135deg,#1a2a1a 0%,#0d1a0d 100%);
+            border:1.5px solid #4A6741;border-radius:10px;
+            padding:1.2rem 1.6rem;margin-bottom:1.2rem">
+  <div style="color:#9DC88D;font-size:0.8rem;font-weight:600;
+              letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.5rem">
+    CB DELTA — HEADLINE NUMBER
+  </div>
+  <div style="display:flex;align-items:baseline;gap:0.8rem;flex-wrap:wrap">
+    <span style="color:#E8F5E3;font-size:2.6rem;font-weight:800;line-height:1">
+      {b_full} → {best_cb_full if best_cb_full is not None else "—"}
+    </span>
+    <span style="color:#9DC88D;font-size:1.2rem;font-weight:600">panic exits</span>
+    <span style="background:#4A6741;color:#E8F5E3;font-size:1rem;font-weight:700;
+                 padding:0.15rem 0.6rem;border-radius:4px">
+      −{pct_reduction:.0f}%
+    </span>
+    <span style="color:#7aaa70;font-size:0.9rem">with any CB present vs. no intervention</span>
+  </div>
+  <div style="display:flex;gap:2rem;margin-top:1rem;flex-wrap:wrap">
+    <div style="flex:1;min-width:200px">
+      <div style="color:#9DC88D;font-size:0.75rem;font-weight:600;
+                  letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.3rem">
+        AI-POWERED CB
+      </div>
+      <div style="color:#E8F5E3;font-size:1.05rem;font-weight:700">{ai_action_str}
+        <span style="color:#6dbf60;font-size:0.9rem;margin-left:0.3rem">{ai_correct}</span>
+      </div>
+      <div style="color:#9DC88D;font-size:0.85rem;margin-top:0.15rem">{ai_res_str} at trigger</div>
+      <div style="color:#7aaa70;font-size:0.8rem;margin-top:0.1rem">read bank state before deciding</div>
+    </div>
+    <div style="flex:1;min-width:200px;border-left:1px solid #2d4d2d;padding-left:2rem">
+      <div style="color:#C8A060;font-size:0.75rem;font-weight:600;
+                  letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.3rem">
+        RULE-BASED CB
+      </div>
+      <div style="color:#F5E8D0;font-size:1.05rem;font-weight:700">{rule_action_str}
+        <span style="color:#d4844a;font-size:0.9rem;margin-left:0.3rem">{rule_correct}</span>
+      </div>
+      <div style="color:#C8A060;font-size:0.85rem;margin-top:0.15rem">{rule_res_str} at trigger</div>
+      <div style="color:#a08040;font-size:0.8rem;margin-top:0.1rem">fires identical response every time</div>
+    </div>
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    # ─────────────────────────────────────────────────────────────────────────
 
     if using_cascade:
         title = "Finding 5 — AI regulator reads the situation. Rule-based one fires blindly."
@@ -746,7 +832,6 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     st.markdown(lead)
 
     # ── Bar chart: agents who fully exited ────────────────────────────────
-    n_total = baseline.get("metrics", {}).get("total_agents", 12)
     labels, values, colors, dep_fracs = [], [], [], []
 
     labels.append("No intervention\n(baseline)")
