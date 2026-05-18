@@ -255,6 +255,70 @@ _CB_RULE = CentralBankConfig(
 # ---------------------------------------------------------------------------
 
 CB_PRESETS: List[Tuple[str, str, Scenario]] = [
+    # ── True alarm: bank actually insolvent ──────────────────────────────────
+    (
+        "rumor_high_true_llm_cb",
+        "High Rumor — Bank Insolvent + AI Central Bank",
+        Scenario(
+            scenario_id="rumor_high_true_llm_cb",
+            name="High-Credibility Rumor — Bank Insolvent + AI Central Bank",
+            description=(
+                "A high-credibility rumor and the bank really is insolvent. "
+                "An AI-powered CB monitors in real time — does it correctly choose "
+                "to intervene when the threat is genuine?"
+            ),
+            rumors=[
+                RumorConfig(
+                    content=_RUMOR_HIGH,
+                    source="financial_regulator",
+                    credibility=0.85,
+                    target_bank_id="bank_a",
+                    publish_at_time=0.0,
+                    is_true=True,
+                    propagation_latency_seconds=3.0,
+                )
+            ],
+            banks=_BANKS,
+            population=_POPULATION,
+            speed=ScenarioSpeed.AI_SPEED,
+            social_signal_visibility=1.0,
+            seed=42,
+            max_simulation_time=3600.0,
+            central_bank=_CB_LLM,
+        ),
+    ),
+    (
+        "rumor_high_true_rule_cb",
+        "High Rumor — Bank Insolvent + Rule-Based Central Bank",
+        Scenario(
+            scenario_id="rumor_high_true_rule_cb",
+            name="High-Credibility Rumor — Bank Insolvent + Rule-Based Central Bank",
+            description=(
+                "Same genuine crisis — bank insolvent — but CB uses a fixed rule. "
+                "It fires correctly here (bank is actually failing), but for the "
+                "wrong reason: it can't distinguish this from a false alarm."
+            ),
+            rumors=[
+                RumorConfig(
+                    content=_RUMOR_HIGH,
+                    source="financial_regulator",
+                    credibility=0.85,
+                    target_bank_id="bank_a",
+                    publish_at_time=0.0,
+                    is_true=True,
+                    propagation_latency_seconds=3.0,
+                )
+            ],
+            banks=_BANKS,
+            population=_POPULATION,
+            speed=ScenarioSpeed.AI_SPEED,
+            social_signal_visibility=1.0,
+            seed=42,
+            max_simulation_time=3600.0,
+            central_bank=_CB_RULE,
+        ),
+    ),
+    # ── False alarm: bank actually solvent ───────────────────────────────────
     (
         "rumor_high_false_llm_cb",
         "High Rumor — Bank Solvent + AI Central Bank",
