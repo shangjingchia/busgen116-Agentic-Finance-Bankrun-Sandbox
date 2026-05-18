@@ -879,7 +879,17 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
         )
     # ─────────────────────────────────────────────────────────────────────────
 
-    if using_cascade:
+    if have_2x2:
+        title = "Finding 5 — AI CB: 2/2. Rule CB: 1/2 — got lucky once."
+        lead = (
+            "We ran the Central Bank against both a **false alarm** (bank healthy) and a **true alarm** "
+            "(bank genuinely insolvent). The **AI-powered CB** read the bank's reserve ratio both times "
+            "and made the right call: held fire at 30% reserves, intervened at 15% reserves. "
+            "The **rule-based CB** fired an identical deposit guarantee in both scenarios — "
+            "correct on the true alarm by accident, wasteful on the false one. "
+            f"In the false-alarm cascade below, {cascade_str} with no intervention."
+        )
+    elif using_cascade:
         title = "Finding 5 — AI regulator reads the situation. Rule-based one fires blindly."
         lead = (
             f"In the cascading scenario (45% credibility false alarm), {cascade_str} with no intervention. "
