@@ -19,7 +19,7 @@ import random
 from typing import List
 
 from src.core.agent import Agent
-from src.core.event import AgentObserved, EventType, RumorPublished, SocialSignalEmitted
+from src.core.event import AgentObserved, EventType, PolicyAnnounced, RumorPublished, SocialSignalEmitted
 from src.core.scenario import Scenario
 
 
@@ -71,6 +71,31 @@ class Feed:
                     timestamp=rumor.timestamp + latency,
                     agent_id=agent.agent_id,
                     observed_event_id=rumor.event_id,
+                    observation_latency=latency,
+                )
+            )
+        return events
+
+    def route_policy_announcement(self, event: PolicyAnnounced) -> List[AgentObserved]:
+        """Route a CB policy announcement to all news-feed subscribers.
+
+        Uses the same archetype-based latency as rumors (institutional agents
+        hear it faster) but always broadcasts to everyone — no visibility filter.
+        """
+        events: List[AgentObserved] = []
+        mean_latency = 2.0  # CB announcements propagate quickly
+        for agent in self._agents.values():
+            if "news_feed" not in agent.subscriptions:
+                continue
+            arch = getattr(agent.persona, "archetype", "")
+            lo, hi = _ARCHETYPE_LATENCY_BAND.get(arch, _DEFAULT_LATENCY_BAND)
+            latency = self._rng.uniform(lo * mean_latency, hi * mean_latency)
+            events.append(
+                AgentObserved(
+                    event_type=EventType.AGENT_OBSERVED,
+                    timestamp=event.timestamp + latency,
+                    agent_id=agent.agent_id,
+                    observed_event_id=event.event_id,
                     observation_latency=latency,
                 )
             )

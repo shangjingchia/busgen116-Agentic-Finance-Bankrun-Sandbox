@@ -315,6 +315,124 @@ def _render_decision_history_expander(history: List[Dict]) -> None:
                 st.markdown("---")
 
 
+def _render_cb_decision_detail(run: Dict, all_events: List[Dict]) -> None:
+    """Detail view for the Central Bank's decision — the demo's strongest moment."""
+    cb_events = [e for e in all_events if e.get("event_type") == "central_bank_acted"]
+    trigger_events = [e for e in all_events if e.get("event_type") == "central_bank_triggered"]
+
+    metrics = run.get("metrics", {})
+    policy_type = metrics.get("cb_policy_type") or (cb_events[0].get("policy_type") if cb_events else None)
+
+    st.subheader("🏛 Central Bank")
+
+    if not cb_events:
+        st.info("The Central Bank was configured but never triggered — the cascade threshold was not reached.")
+        return
+
+    cb = cb_events[0]
+    trigger = trigger_events[0] if trigger_events else {}
+
+    action = cb.get("action", "")
+    reasoning = cb.get("reasoning", "")
+    announcement = cb.get("announcement_text", "")
+    confidence = cb.get("confidence")
+    model_used = cb.get("model_used", "")
+    ts = cb.get("timestamp", 0)
+    cascade_frac = trigger.get("cascade_fraction", 0.0)
+    withdrawn_count = trigger.get("withdrawn_count", 0)
+    total_agents = trigger.get("total_agents", 0)
+    bank_state = trigger.get("bank_state", "healthy")
+    reserve_ratio = trigger.get("bank_reserve_ratio", 0.0)
+
+    is_llm = policy_type == "llm"
+    policy_badge = "🤖 AI-Powered Central Bank" if is_llm else "📋 Rule-Based Central Bank"
+    policy_color = "#1C3A5E" if is_llm else "#4A4A4A"
+    policy_bg = "#EEF3FF" if is_llm else "#F5F5F5"
+
+    action_colors = {
+        "do_nothing": "#AAAAAA",
+        "announce_guarantee": "#4CAF50",
+        "inject_liquidity": "#2196F3",
+    }
+    action_labels = {
+        "do_nothing": "Took no action",
+        "announce_guarantee": "Announced deposit guarantee",
+        "inject_liquidity": "Injected emergency liquidity",
+    }
+    action_color = action_colors.get(action, "#AAA")
+    action_label = action_labels.get(action, action.replace("_", " ").title())
+
+    # Context card
+    st.markdown(
+        f'<div style="background:{policy_bg};border:1.5px solid {policy_color};border-radius:8px;'
+        f'padding:1rem 1.3rem;margin-bottom:1rem">'
+        f'<div style="font-weight:700;font-size:1.05rem;color:{policy_color};margin-bottom:0.5rem">'
+        f'{policy_badge}</div>'
+        f'<div style="font-size:0.9rem;color:#444;line-height:1.8">'
+        f'Triggered at <b>T+{ts:.0f}s</b> &nbsp;·&nbsp; '
+        f'Cascade: <b>{cascade_frac:.0%}</b> ({withdrawn_count}/{total_agents} withdrew) &nbsp;·&nbsp; '
+        f'Bank A: <b>{bank_state}</b> · reserve <b>{reserve_ratio:.0%}</b>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Action banner
+    meta_parts: List[str] = [f"T+{ts:.0f}s"]
+    if confidence is not None:
+        meta_parts.append(f"confidence {confidence:.0%}")
+    short_model = ""
+    if model_used and model_used != "rule_based":
+        short_model = model_used.split("/")[-1] if "/" in model_used else model_used
+        meta_parts.append(short_model)
+
+    st.markdown(
+        f'<div style="background:{action_color}22;border-left:5px solid {action_color};'
+        f'border-radius:6px;padding:0.6rem 1rem;margin-bottom:0.8rem">'
+        f'<span style="font-size:1.05rem;font-weight:700">{action_label}</span>'
+        f'<span style="color:#666;font-size:0.85rem;margin-left:1rem">'
+        f'{" · ".join(meta_parts)}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    # Official announcement text
+    if announcement:
+        st.markdown("**Official announcement issued**")
+        st.markdown(
+            f'<div style="background:#F0FFF0;border:1px solid #4CAF50;'
+            f'border-radius:6px;padding:0.9rem 1.1rem;font-size:0.93rem;'
+            f'line-height:1.75;color:#2C5F2C;margin-bottom:1rem">'
+            f'&#8220;{announcement}&#8221;</div>',
+            unsafe_allow_html=True,
+        )
+
+    # LLM reasoning — the centrepiece of the CB view
+    if is_llm and reasoning:
+        st.markdown("**What the AI regulator was thinking**")
+        st.markdown(
+            f'<div style="background:#FAFAFA;border:1px solid #E0E0E0;'
+            f'border-radius:6px;padding:0.9rem 1.1rem;font-size:0.93rem;'
+            f'line-height:1.75;font-style:italic;color:#2C2C2C">'
+            f'{reasoning}</div>',
+            unsafe_allow_html=True,
+        )
+    elif not is_llm:
+        st.caption(
+            "Rule-based policy: fires automatically when the withdrawal threshold is crossed. "
+            "No LLM reasoning — this represents an institution that has not yet adopted AI-speed judgment."
+        )
+
+    # Technical call details
+    prompt_tokens = cb.get("prompt_tokens", 0)
+    completion_tokens = cb.get("completion_tokens", 0)
+    cost_usd = cb.get("cost_usd", 0.0)
+    if prompt_tokens or completion_tokens:
+        with st.expander("CB call details"):
+            dc = st.columns(3)
+            dc[0].metric("Model", short_model or "—")
+            dc[1].metric("Tokens", f"{prompt_tokens + completion_tokens:,}")
+            dc[2].metric("Cost", f"${cost_usd:.4f}")
+
+
 def _render_outcome_ledger_expander(ledger: Dict) -> None:
     start = ledger.get("principal_starting_value", 0.0)
     current = ledger.get("principal_current_value", 0.0)
@@ -369,9 +487,27 @@ def render_inspect() -> None:
 
     list_col, detail_col = st.columns([1, 2], gap="medium")
 
+    # Detect whether this run has a Central Bank
+    metrics = run.get("metrics", {})
+    has_cb = bool(metrics.get("cb_policy_type"))
+
     # ── Agent roster ──────────────────────────────────────────────────────
     with list_col:
         st.subheader("Agents")
+
+        # Central Bank entry — shown at top when CB was present in this run
+        if has_cb:
+            cb_acted = any(e.get("event_type") == "central_bank_acted" for e in all_events)
+            cb_policy = metrics.get("cb_policy_type", "")
+            cb_icon = "🤖" if cb_policy == "llm" else "📋"
+            cb_status = " ✅" if cb_acted else " —"
+            is_cb_selected = st.session_state.get("selected_agent_id") == "__cb__"
+            cb_btn_label = f"{'▶ ' if is_cb_selected else ''}{cb_icon} Central Bank{cb_status}"
+            if st.button(cb_btn_label, key="agent_btn___cb__", use_container_width=True):
+                st.session_state.selected_agent_id = "__cb__"
+                st.rerun()
+            st.caption("  intervened" if cb_acted else "  threshold not reached")
+            st.divider()
 
         for arch in _ARCHETYPE_ORDER:
             arch_agents = [
@@ -426,11 +562,16 @@ def render_inspect() -> None:
     with detail_col:
         selected_id = st.session_state.get("selected_agent_id")
 
+        if selected_id == "__cb__":
+            _render_cb_decision_detail(run, all_events)
+            return
+
         if selected_id is None:
+            hint = " Or click **Central Bank** to read what the AI regulator was thinking." if has_cb else ""
             st.markdown(
                 '<div style="color:#888;font-size:0.95rem;padding-top:2rem">'
                 'Select an agent from the list to read what they were thinking '
-                'when they decided what to do with their money.'
+                f'when they decided what to do with their money.{hint}'
                 '</div>',
                 unsafe_allow_html=True,
             )
