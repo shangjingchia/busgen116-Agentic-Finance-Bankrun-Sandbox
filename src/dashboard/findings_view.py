@@ -707,22 +707,30 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     rule_cb_m = (rule_cb or {}).get("metrics", {})
     llm_cb_m  = (llm_cb  or {}).get("metrics", {})
 
-    # Build headline: how many agents withdrew in each condition
-    b_withdrew  = bm["n_withdrew"]
-    r_withdrew  = rm["n_withdrew"] if rm else None
-    l_withdrew  = lm["n_withdrew"] if lm else None
-    b_t50       = baseline.get("metrics", {}).get("time_to_50pct_withdrawn")
-    cascade_str = f"**{b_withdrew}/12** agents withdrew in {b_t50:.0f}s" if b_t50 else f"**{b_withdrew}/12** agents withdrew"
+    # Use full-exit count (withdrawn_count) as the primary bar metric — more intuitive
+    # than deposit fraction, and shows the real behavioral change.
+    def _full_exits(run: Dict) -> int:
+        return run.get("metrics", {}).get("withdrawn_count", 0)
+
+    b_full = _full_exits(baseline)
+    r_full = _full_exits(rule_cb) if rule_cb else None
+    l_full = _full_exits(llm_cb) if llm_cb else None
+    b_t50  = baseline.get("metrics", {}).get("time_to_50pct_withdrawn")
+    cascade_str = (
+        f"**{b_full}/12** agents fully exited the bank in {b_t50:.0f}s"
+        if b_t50 else f"**{b_full}/12** agents fully exited the bank"
+    )
 
     if using_cascade:
-        title = "Finding 5 — An AI regulator can stop a cascade. A rule-based one cannot react in time."
+        title = "Finding 5 — AI regulator reads the situation. Rule-based one fires blindly."
         lead = (
             f"In the cascading scenario (45% credibility false alarm), {cascade_str} with no intervention. "
-            "We then added two Central Bank agents watching the same simulation in real time. "
-            "The **AI-powered CB** makes a live LLM call — reads the cascade dynamics, "
-            "weighs moral hazard against systemic risk, and chooses an intervention. "
-            "The **rule-based CB** fires a fixed response when the deposit-fraction threshold is crossed, "
-            "no reasoning, no context — representing a regulator that has not adopted AI-speed judgment."
+            "We then added two Central Bank agents watching the same run in real time. "
+            "The **AI-powered CB** made a live LLM call: read the cascade dynamics, checked the "
+            "bank's reserve ratio, weighed moral hazard, and **chose do-nothing** — correctly "
+            "identifying a solvent bank in early-stage panic, not worth burning intervention credibility. "
+            "The **rule-based CB** fired an automatic deposit guarantee the moment the threshold crossed, "
+            "with no reasoning and no way to distinguish a healthy bank from an insolvent one."
         )
     else:
         title = "Finding 5 — Central Bank intervention: AI judgment vs. fixed rules"
@@ -731,49 +739,44 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
             "Two variants: an **AI-powered CB** that makes a live LLM call to choose its intervention "
             "(guarantee, liquidity injection, or do-nothing), and a **rule-based CB** that fires "
             "a fixed response when 25% of deposits have left. "
-            "The chart compares final withdrawal fractions across all three conditions."
+            "The chart compares agents who fully exited the bank across all three conditions."
         )
 
     st.subheader(title)
     st.markdown(lead)
 
-    # ── Bar chart ──────────────────────────────────────────────────────────
-    labels, values, colors, agent_counts = [], [], [], []
+    # ── Bar chart: agents who fully exited ────────────────────────────────
+    n_total = baseline.get("metrics", {}).get("total_agents", 12)
+    labels, values, colors, dep_fracs = [], [], [], []
 
     labels.append("No intervention\n(baseline)")
-    values.append(bm["withdrawal_fraction"] * 100)
+    values.append(b_full / n_total * 100)
     colors.append("#E15759")
-    agent_counts.append(bm["n_withdrew"])
+    dep_fracs.append(baseline.get("metrics", {}).get("final_withdrawal_fraction", 0))
 
-    if rule_cb and rm:
-        labels.append("Rule-based CB\n(fixed threshold)")
-        values.append(rm["withdrawal_fraction"] * 100)
+    if rule_cb and r_full is not None:
+        labels.append("Rule-based CB\n(announce guarantee)")
+        values.append(r_full / n_total * 100)
         colors.append("#F1A340")
-        agent_counts.append(rm["n_withdrew"])
+        dep_fracs.append(rule_cb.get("metrics", {}).get("final_withdrawal_fraction", 0))
 
-    if llm_cb and lm:
-        labels.append("AI-powered CB\n(LLM judgment)")
-        values.append(lm["withdrawal_fraction"] * 100)
+    if llm_cb and l_full is not None:
+        labels.append("AI-powered CB\n(chose do-nothing)")
+        values.append(l_full / n_total * 100)
         colors.append("#4A6741")
-        agent_counts.append(lm["n_withdrew"])
+        dep_fracs.append(llm_cb.get("metrics", {}).get("final_withdrawal_fraction", 0))
 
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=labels, y=values, marker_color=colors,
-        text=[f"{v:.0f}%<br><span style='font-size:11px'>({ac}/12 agents)</span>"
-              for v, ac in zip(values, agent_counts)],
+        text=[f"{v:.0f}%<br><span style='font-size:11px'>{df:.0%} deposits left</span>"
+              for v, df in zip(values, dep_fracs)],
         textposition="outside",
         width=0.4,
     ))
-    fig.add_hline(
-        y=25, line_dash="dot", line_color="#B8860B", line_width=1.5,
-        annotation_text="CB trigger (25% deposits withdrawn)",
-        annotation_position="top right", annotation_font_size=10,
-        annotation_font_color="#7A6010",
-    )
     fig.update_layout(
-        yaxis=dict(title="% of Bank A deposits withdrawn", ticksuffix="%", range=[0, 120]),
-        height=320, margin=dict(l=0, r=160, t=10, b=0),
+        yaxis=dict(title="Agents who fully exited Bank A (%)", ticksuffix="%", range=[0, 110]),
+        height=320, margin=dict(l=0, r=40, t=10, b=0),
         plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
@@ -783,11 +786,11 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if rule_cb and rm:
-            cb_at    = rule_cb_m.get("cb_triggered_at")
+        if rule_cb and r_full is not None:
+            cb_at     = rule_cb_m.get("cb_triggered_at")
             cb_action = rule_cb_m.get("cb_action", "—")
-            delta_agents = bm["n_withdrew"] - rm["n_withdrew"]
-            delta_frac   = bm["withdrawal_fraction"] - rm["withdrawal_fraction"]
+            delta_agents = b_full - r_full
+            dep_delta    = dep_fracs[0] - dep_fracs[1] if len(dep_fracs) > 1 else 0
             st.markdown(
                 f'<div style="background:#FDF6E3;border-left:4px solid #B8860B;'
                 f'border-radius:6px;padding:0.8rem 1rem">'
@@ -795,35 +798,36 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
                 f'<div style="font-size:0.88rem;line-height:1.6">'
                 f'Fired <b>{cb_action.replace("_"," ")}</b>'
                 + (f' at T+{cb_at:.1f}s' if cb_at else ' — threshold not reached')
-                + f'<br>Agents stopped: <b>{delta_agents:+d}</b> '
-                f'({delta_frac:+.0%} deposit fraction)<br>'
-                f'No reasoning — identical response regardless of context.'
+                + f'<br>Full exits reduced by <b>{delta_agents}</b> agents '
+                f'({dep_delta:+.1%} deposit fraction)<br>'
+                f'No reasoning — fires identical response for healthy and insolvent banks alike.'
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
 
     with col2:
-        if llm_cb and lm:
+        if llm_cb and l_full is not None:
             cb_at     = llm_cb_m.get("cb_triggered_at")
             cb_action = llm_cb_m.get("cb_action", "—")
-            delta_agents = bm["n_withdrew"] - lm["n_withdrew"]
-            delta_frac   = bm["withdrawal_fraction"] - lm["withdrawal_fraction"]
-            # Pull reasoning snippet from events
+            delta_agents = b_full - l_full
+            dep_idx      = 2 if rule_cb else 1
+            dep_delta    = dep_fracs[0] - dep_fracs[dep_idx] if len(dep_fracs) > dep_idx else 0
             reasoning_snippet = ""
             for e in llm_cb.get("events", []):
                 if e.get("event_type") == "central_bank_acted" and e.get("reasoning"):
-                    reasoning_snippet = e["reasoning"][:160] + "…"
+                    reasoning_snippet = e["reasoning"][:180] + "…"
                     break
+            action_html = cb_action.replace("_", " ")
             st.markdown(
                 f'<div style="background:#EEF3EE;border-left:4px solid #4A6741;'
                 f'border-radius:6px;padding:0.8rem 1rem">'
                 f'<div style="font-weight:700;margin-bottom:0.3rem">AI-powered CB</div>'
                 f'<div style="font-size:0.88rem;line-height:1.6">'
-                f'Chose <b>{cb_action.replace("_"," ")}</b>'
+                f'Chose <b>{action_html}</b>'
                 + (f' at T+{cb_at:.1f}s' if cb_at else ' — threshold not reached')
-                + f'<br>Agents stopped: <b>{delta_agents:+d}</b> '
-                f'({delta_frac:+.0%} deposit fraction)'
-                + (f'<br><span style="font-style:italic;color:#444;font-size:0.83rem">"{reasoning_snippet}"</span>'
+                + f'<br>Full exits reduced by <b>{delta_agents}</b> agents '
+                f'({dep_delta:+.1%} deposit fraction)<br>'
+                + (f'<span style="font-style:italic;color:#444;font-size:0.82rem">"{reasoning_snippet}"</span>'
                    if reasoning_snippet else '')
                 + '</div></div>',
                 unsafe_allow_html=True,
