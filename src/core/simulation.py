@@ -76,9 +76,11 @@ from src.information.rumor import rumor_config_to_event
 
 logger = logging.getLogger(__name__)
 
-# Social cascade re-decision tiers: fractions of peers whose withdrawals
-# trigger successive re-decisions. At most one re-decision per tier per agent.
-_RETRIGGER_TIERS = (0.15, 0.35, 0.60)
+# Social cascade re-decision tiers are personalized from each persona's first
+# reconsideration threshold. Offsets allow at most three re-decisions as peer
+# pressure grows without flattening every archetype into the same response curve.
+_RETRIGGER_TIER_OFFSETS = (0.0, 0.20, 0.45)
+_CASH_KEY = "cash:available"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,10 @@ class RunMetrics:
     time_to_first_withdrawal: Optional[float]
     time_to_50pct_withdrawn: Optional[float]
     final_withdrawal_fraction: float  # fraction of Bank A deposits withdrawn
+    attempted_exit_count: int
+    paid_out_count: int
+    time_to_50pct_deposits_paid: Optional[float]
+    bank_suspension_time: Optional[float]
     cascade_triggered: bool
     total_events: int
     total_llm_calls: int
@@ -112,6 +118,10 @@ class RunMetrics:
             "time_to_first_withdrawal": self.time_to_first_withdrawal,
             "time_to_50pct_withdrawn": self.time_to_50pct_withdrawn,
             "final_withdrawal_fraction": self.final_withdrawal_fraction,
+            "attempted_exit_count": self.attempted_exit_count,
+            "paid_out_count": self.paid_out_count,
+            "time_to_50pct_deposits_paid": self.time_to_50pct_deposits_paid,
+            "bank_suspension_time": self.bank_suspension_time,
             "cascade_triggered": self.cascade_triggered,
             "total_events": self.total_events,
             "total_llm_calls": self.total_llm_calls,
@@ -208,8 +218,12 @@ class SimulationEngine:
         # Outcome tracking
         self._first_withdrawal_time: Optional[float] = None
         self._time_to_50pct: Optional[float] = None
+        self._time_to_50pct_deposits_paid: Optional[float] = None
+        self._bank_suspension_time: Optional[float] = None
         self._withdrawn_agents: Set[str] = set()
         self._partially_withdrawn_agents: Set[str] = set()
+        self._attempted_exit_agents: Set[str] = set()
+        self._paid_out_agents: Set[str] = set()
 
         # Initial deposit totals per bank (for withdrawal-fraction metric)
         self._initial_deposits: Dict[str, float] = {
@@ -362,15 +376,20 @@ class SimulationEngine:
             self._social_details[event.agent_id].append(obs_str)
             self._social_count[event.agent_id] += 1
 
-            # Tiered re-decision: fire each time the social count crosses the
-            # next tier threshold (up to len(_RETRIGGER_TIERS) re-decisions).
+            # Tiered re-decision: fire each time this persona crosses their
+            # next social threshold.
             total_others = len(self._agents) - 1
             current_tier = self._re_decided_tier[event.agent_id]
+            base_threshold = agent.persona.peer_action_reconsideration_threshold
+            retrigger_tiers = tuple(
+                min(0.95, base_threshold + offset)
+                for offset in _RETRIGGER_TIER_OFFSETS
+            )
             if (
-                current_tier < len(_RETRIGGER_TIERS)
+                current_tier < len(retrigger_tiers)
                 and agent.state != AgentState.WITHDRAWN
             ):
-                next_frac = _RETRIGGER_TIERS[current_tier]
+                next_frac = retrigger_tiers[current_tier]
                 if self._social_count[event.agent_id] >= next_frac * max(total_others, 1):
                     self._re_decided_tier[event.agent_id] = current_tier + 1
                     delay = self._decision_delay()
@@ -427,12 +446,24 @@ class SimulationEngine:
             logger.warning("Unknown bank %s in AgentActed", event.bank_id)
             return new_events
 
-        result = bank.process_withdrawal(agent.agent_id, amount_requested)
+        result = bank.process_withdrawal(
+            agent.agent_id,
+            amount_requested,
+            timestamp=event.timestamp,
+        )
 
         # Keep agent portfolio in sync with bank deposits
         agent.portfolio[deposit_key] = max(
             0.0, agent.portfolio.get(deposit_key, 0.0) - result.amount_debited
         )
+        if result.amount_paid_out > 0:
+            agent.portfolio[_CASH_KEY] = (
+                agent.portfolio.get(_CASH_KEY, 0.0) + result.amount_paid_out
+            )
+            self._paid_out_agents.add(agent.agent_id)
+        self._attempted_exit_agents.add(agent.agent_id)
+        if self._first_withdrawal_time is None:
+            self._first_withdrawal_time = event.timestamp
 
         # Record realized fee cost
         if result.fee_paid > 0 and agent.outcome_ledger is not None:
@@ -444,7 +475,8 @@ class SimulationEngine:
                     decision_event_id=event.event_id,
                     description=(
                         f"Early withdrawal fee: ${result.fee_paid:,.2f} "
-                        f"on ${amount_requested:,.0f} requested from {event.bank_id}"
+                        f"on ${result.amount_debited:,.0f} debited from {event.bank_id} "
+                        f"(${amount_requested:,.0f} requested)"
                     ),
                 )
             )
@@ -458,14 +490,21 @@ class SimulationEngine:
         if remaining <= 0.0:
             agent.state = AgentState.WITHDRAWN
             self._withdrawn_agents.add(agent.agent_id)
-            if self._first_withdrawal_time is None:
-                self._first_withdrawal_time = event.timestamp
             frac_withdrawn = len(self._withdrawn_agents) / len(self._agents)
             if frac_withdrawn >= 0.50 and self._time_to_50pct is None:
                 self._time_to_50pct = event.timestamp
         else:
             agent.state = AgentState.HAS_DECIDED
             self._partially_withdrawn_agents.add(agent.agent_id)
+
+        focus_initial = self._initial_deposits.get(event.bank_id, 0.0)
+        if focus_initial > 0:
+            current_total = bank.total_deposits()
+            paid_fraction = max(0.0, (focus_initial - current_total) / focus_initial)
+            if paid_fraction >= 0.50 and self._time_to_50pct_deposits_paid is None:
+                self._time_to_50pct_deposits_paid = event.timestamp
+        if bank.state.value == "suspended" and self._bank_suspension_time is None:
+            self._bank_suspension_time = event.timestamp
 
         # Central Bank trigger: fires once when deposit-fraction-withdrawn crosses threshold.
         # Uses reserves-depleted fraction (partial withdrawals count) rather than agent count,
@@ -846,7 +885,11 @@ class SimulationEngine:
             time_to_first_withdrawal=self._first_withdrawal_time,
             time_to_50pct_withdrawn=self._time_to_50pct,
             final_withdrawal_fraction=withdrawal_fraction,
-            cascade_triggered=fully >= max(1, n // 4),
+            attempted_exit_count=len(self._attempted_exit_agents),
+            paid_out_count=len(self._paid_out_agents),
+            time_to_50pct_deposits_paid=self._time_to_50pct_deposits_paid,
+            bank_suspension_time=self._bank_suspension_time,
+            cascade_triggered=withdrawal_fraction >= 0.25,
             total_events=len(self._event_log),
             total_llm_calls=summary.total_calls,
             total_cost_usd=summary.total_cost_usd,
@@ -950,10 +993,18 @@ async def run_scenario(
             f"Held: {m.held_count}"
         )
         print(f"  Deposits withdrawn: {m.final_withdrawal_fraction:.1%} of Bank A total")
+        print(
+            f"  Tried to exit: {m.attempted_exit_count}/{m.total_agents}  |  "
+            f"Got cash: {m.paid_out_count}/{m.total_agents}"
+        )
         if m.time_to_first_withdrawal is not None:
             print(f"  Time to first withdrawal: {m.time_to_first_withdrawal:.1f}s")
+        if m.time_to_50pct_deposits_paid is not None:
+            print(f"  Time to 50%% deposits paid: {m.time_to_50pct_deposits_paid:.1f}s")
         if m.time_to_50pct_withdrawn is not None:
             print(f"  Time to 50%% withdrawn:   {m.time_to_50pct_withdrawn:.1f}s")
+        if m.bank_suspension_time is not None:
+            print(f"  Bank suspended:           {m.bank_suspension_time:.1f}s")
         print(f"  Cascade: {'YES' if m.cascade_triggered else 'no'}")
         print(f"  Events: {m.total_events}  |  Wall clock: {result.duration_seconds:.1f}s")
         print()
@@ -993,9 +1044,9 @@ def make_rumor_moderate_scenario(
         rumors=[
             RumorConfig(
                 content=(
-                    "Bank A is facing a severe liquidity crisis and may not be able "
-                    "to meet all withdrawal requests. Several large corporate depositors "
-                    "are rumored to have already begun moving funds."
+                    "Redwood Regional Bank is facing unusual liquidity pressure "
+                    "after a weak quarterly call report. Several large corporate "
+                    "depositors are rumored to have begun moving funds."
                 ),
                 source="financial_news_outlet",
                 credibility=0.55,
@@ -1008,14 +1059,14 @@ def make_rumor_moderate_scenario(
         banks=[
             BankConfig(
                 bank_id="bank_a",
-                name="Bank A",
+                name="Redwood Regional Bank",
                 initial_reserve_ratio=0.10,
                 early_withdrawal_fee_rate=0.03,
-                withdrawal_processing_capacity=5_000_000.0,
+                withdrawal_processing_capacity=450_000.0,
             ),
             BankConfig(
                 bank_id="bank_b",
-                name="Bank B",
+                name="Harbor National Bank",
                 initial_reserve_ratio=0.20,
                 early_withdrawal_fee_rate=0.02,
                 withdrawal_processing_capacity=5_000_000.0,

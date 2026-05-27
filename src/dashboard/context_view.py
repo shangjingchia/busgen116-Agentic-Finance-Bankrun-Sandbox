@@ -303,7 +303,7 @@ def render_context() -> None:
                     unsafe_allow_html=True,
                 )
             else:
-                st.info("Run paired scenarios (AI + human speed) from Configure to see this finding.")
+                st.info("Run paired scenarios (AI + human speed) from Presets to see this finding.")
 
     with anchor_col:
         st.markdown("**The Iyer-Puri threshold**")

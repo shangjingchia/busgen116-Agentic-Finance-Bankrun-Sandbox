@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional
 
 
 class BankState(str, Enum):
@@ -54,6 +54,8 @@ class Bank:
     # State stamps populated by the engine
     distress_threshold: float = field(default=0.20)   # ratio below which bank is distressed
     suspension_threshold: float = field(default=0.05) # ratio below which bank suspends
+    _capacity_window_second: Optional[int] = field(default=None, init=False, repr=False)
+    _capacity_used_in_window: float = field(default=0.0, init=False, repr=False)
 
     def total_deposits(self) -> float:
         return sum(self.deposits.values())
@@ -74,12 +76,21 @@ class Bank:
             self.state = BankState.HEALTHY
         return self.state
 
-    def process_withdrawal(self, agent_id: str, amount_requested: float) -> WithdrawalResult:
+    def process_withdrawal(
+        self,
+        agent_id: str,
+        amount_requested: float,
+        *,
+        timestamp: Optional[float] = None,
+    ) -> WithdrawalResult:
         """Process a withdrawal. Mutates self.deposits and self.reserves.
 
         For v1, fees are deducted from the gross debited amount. The agent receives
         (amount - fee). The bank loses (amount - fee) of reserves; the fee remains
         as bank capital (it does not leave the bank).
+
+        If a timestamp is supplied, withdrawal_processing_capacity is enforced as
+        a per-second gross-debit cap. Requests beyond that capacity remain queued.
         """
         if agent_id not in self.deposits:
             raise ValueError(f"Agent {agent_id} has no deposit at {self.bank_id}")
@@ -94,7 +105,30 @@ class Bank:
                 new_bank_state=self.state,
             )
 
-        gross = min(amount_requested, self.deposits[agent_id])
+        requested_gross = min(amount_requested, self.deposits[agent_id])
+        capacity_remaining = requested_gross
+        if timestamp is not None and self.withdrawal_processing_capacity >= 0:
+            window_second = int(timestamp)
+            if self._capacity_window_second != window_second:
+                self._capacity_window_second = window_second
+                self._capacity_used_in_window = 0.0
+            capacity_remaining = max(
+                0.0,
+                self.withdrawal_processing_capacity - self._capacity_used_in_window,
+            )
+
+        gross = min(requested_gross, capacity_remaining)
+        capacity_limited = gross < requested_gross
+        if gross <= 0.0:
+            return WithdrawalResult(
+                amount_requested=amount_requested,
+                amount_paid_out=0.0,
+                amount_debited=0.0,
+                fee_paid=0.0,
+                was_queued=True,
+                new_bank_state=self.state,
+            )
+
         fee = gross * self.early_withdrawal_fee_rate
         net_to_agent = gross - fee
 
@@ -126,10 +160,12 @@ class Bank:
                 amount_paid_out=net_to_agent,
                 amount_debited=gross,
                 fee_paid=fee,
-                was_queued=False,
+                was_queued=capacity_limited,
                 new_bank_state=self._recompute_state(),
             )
 
+        if timestamp is not None:
+            self._capacity_used_in_window += result.amount_debited
         return result
 
     def to_dict(self) -> dict[str, Any]:

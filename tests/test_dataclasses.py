@@ -90,6 +90,30 @@ def test_bank_processes_withdrawal_with_fee():
     assert not result.was_queued
 
 
+def test_bank_processing_capacity_queues_excess_withdrawal():
+    bank = Bank(
+        bank_id="bank_a",
+        name="First Bank",
+        deposits={"a1": 100_000.0},
+        reserves=100_000.0,
+        reserve_ratio_target=1.0,
+        withdrawal_processing_capacity=10_000.0,
+    )
+    result = bank.process_withdrawal("a1", 50_000.0, timestamp=0.1)
+    assert result.amount_debited == 10_000.0
+    assert result.amount_paid_out == 9_700.0
+    assert result.was_queued
+    assert bank.deposits["a1"] == 90_000.0
+
+    second = bank.process_withdrawal("a1", 10_000.0, timestamp=0.2)
+    assert second.amount_paid_out == 0.0
+    assert second.was_queued
+
+    next_window = bank.process_withdrawal("a1", 10_000.0, timestamp=1.0)
+    assert next_window.amount_debited == 10_000.0
+    assert next_window.amount_paid_out == 9_700.0
+
+
 def test_bank_suspends_when_reserves_exhausted():
     bank = Bank(
         bank_id="bank_a",

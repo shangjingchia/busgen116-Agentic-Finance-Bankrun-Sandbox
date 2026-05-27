@@ -10,6 +10,15 @@ from __future__ import annotations
 
 from src.core.event import PolicyAnnounced, RumorPublished, SocialSignalEmitted
 
+_BANK_LABELS = {
+    "bank_a": "Redwood Regional Bank",
+    "bank_b": "Harbor National Bank",
+}
+
+
+def _bank_label(bank_id: str) -> str:
+    return _BANK_LABELS.get(bank_id, bank_id)
+
 
 def render_rumor_observation(rumor: RumorPublished) -> str:
     label = _credibility_label(rumor.credibility)
@@ -30,7 +39,7 @@ def render_social_observation(signal: SocialSignalEmitted, source_archetype: str
     }.get(signal.action, "took an action")
     return (
         f"[Social feed] A {archetype_label} just {action_phrase} "
-        f"from {signal.bank_id}."
+        f"from {_bank_label(signal.bank_id)}."
     )
 
 

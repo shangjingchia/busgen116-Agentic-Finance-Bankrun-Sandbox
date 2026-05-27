@@ -28,6 +28,16 @@ _SEVERITY_HEADERS = {
     Severity.IRRELEVANT: "IRRELEVANT — these do not factor into your reasoning",
 }
 
+_BANK_LABELS = {
+    "bank_a": "Redwood Regional Bank",
+    "bank_b": "Harbor National Bank",
+}
+
+
+def _bank_label(bank_id: str) -> str:
+    label = _BANK_LABELS.get(bank_id)
+    return f"{label} ({bank_id})" if label else bank_id
+
 
 def _render_cost_function(cost_function: List[CostItem]) -> str:
     """Group cost items by severity, ordered worst-to-least."""
@@ -121,7 +131,7 @@ def render_decision_user_message(
     portfolio_lines: list[str] = []
     for key, amount in sorted(agent.portfolio.items()):
         bank, asset = key.split(":", 1)
-        portfolio_lines.append(f"- {bank} ({asset}): ${amount:,.0f}")
+        portfolio_lines.append(f"- {_bank_label(bank)} ({asset}): ${amount:,.0f}")
     portfolio_block = "\n".join(portfolio_lines) if portfolio_lines else "- (no holdings)"
 
     observation_block = (
@@ -142,7 +152,7 @@ def render_decision_user_message(
 
     sections.append(
         f"## What you must decide now\n\n"
-        f"Decide what to do with your deposit at **{bank_id_in_focus}**. "
+        f"Decide what to do with your deposit at **{_bank_label(bank_id_in_focus)}**. "
         f"Your options are: hold (do nothing), partial_withdraw (specify what fraction), "
         f"full_withdraw (pull everything), or increase_deposit (add more). "
         f"Reason explicitly about your cost function and the asymmetry of being wrong. "

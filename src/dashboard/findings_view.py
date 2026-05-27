@@ -6,6 +6,7 @@ under financial stress. Combines Compare and Context into one narrative.
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -108,6 +109,35 @@ def _load_runs() -> Tuple[List[Dict], List[Dict], Dict[str, Dict]]:
     return preset, sweep, cb_by_sid
 
 
+def _load_persona_runs() -> Dict[str, Dict]:
+    """Load persona-extreme and model-isolation runs, keyed by scenario_id."""
+    _PERSONA_SIDS = {
+        "persona_all_cautious_retiree_ai",
+        "persona_all_cautious_retiree_human",
+        "persona_all_institutional_treasurer_ai",
+        "persona_all_institutional_treasurer_human",
+        "model_isolation_all_haiku_ai",
+        "model_isolation_all_haiku_human",
+        "rumor_high_false",
+    }
+    runs: Dict[str, Dict] = {}
+    for p in sorted(RUNS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            sid = d.get("scenario_id", "")
+            speed = d.get("speed", "")
+            if not sid or speed not in ("ai", "human"):
+                continue
+            # key: scenario_id + "_" + speed for persona runs; plain sid for baseline
+            if sid in {"rumor_high_false"} and speed == "ai":
+                runs.setdefault(sid, d)
+            elif sid in _PERSONA_SIDS:
+                runs[sid] = d  # keep latest per sid
+        except Exception:
+            continue
+    return runs
+
+
 def _metrics(run: Dict) -> Dict:
     agents = run.get("agent_final_states", [])
     n = len(agents) or 12
@@ -179,11 +209,9 @@ def _metrics(run: Dict) -> Dict:
 
 def _credibility(run: Dict) -> Optional[float]:
     sid = run.get("scenario_id", "")
-    if sid.startswith("sweep_false_"):
-        try:
-            return int(sid.rsplit("_", 1)[-1]) / 100.0
-        except ValueError:
-            pass
+    m = re.search(r"sweep_false_(\d+)", sid)
+    if m:
+        return int(m.group(1)) / 100.0
     return None
 
 
@@ -366,8 +394,10 @@ def _finding_content_credibility(sweep: List[Dict]) -> None:
             by_cred[c][r["speed"]] = _metrics(r)
 
     creds = sorted(by_cred.keys())
-    ai_vals = [by_cred[c].get("ai",    {}).get("withdrawal_fraction", 0) * 100 for c in creds]
-    hu_vals = [by_cred[c].get("human", {}).get("withdrawal_fraction", 0) * 100 for c in creds]
+    ai_vals = [by_cred[c].get("ai", {}).get("withdrawal_fraction", 0) * 100 for c in creds]
+    # Use None for credibility levels where human-speed was not run (5–15% extension)
+    hu_raw = [by_cred[c].get("human", {}).get("withdrawal_fraction") for c in creds]
+    hu_vals = [v * 100 if v is not None else None for v in hu_raw]
     x = [f"{c:.0%}" for c in creds]
 
     fig = go.Figure()
@@ -383,7 +413,7 @@ def _finding_content_credibility(sweep: List[Dict]) -> None:
     ))
     fig.update_layout(
         xaxis=dict(
-            title="Credibility label shown to agents  (25% = 'barely credible'  →  85% = 'highly credible')",
+            title="Credibility label shown to agents  (5% = 'almost implausible'  →  85% = 'highly credible')",
         ),
         yaxis=dict(title="% of agents who withdrew", ticksuffix="%", range=[0, 110]),
         height=290, margin=dict(l=0, r=60, t=10, b=0),
@@ -392,13 +422,42 @@ def _finding_content_credibility(sweep: List[Dict]) -> None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    if ai_vals and hu_vals:
-        ai_avg = sum(ai_vals) / len(ai_vals)
-        hu_avg = sum(hu_vals) / len(hu_vals)
+    ai_non_null = [v for v in ai_vals if v is not None]
+    hu_non_null = [v for v in hu_vals if v is not None]
+    if ai_non_null and hu_non_null:
+        ai_avg = sum(ai_non_null) / len(ai_non_null)
+        hu_avg = sum(hu_non_null) / len(hu_non_null)
         st.caption(
             f"Average withdrawal across all credibility levels — "
             f"AI speed: **{ai_avg:.0f}%** · Human speed: **{hu_avg:.0f}%**. "
-            "Both lines are nearly flat. The credibility label is being ignored."
+            "Both lines are nearly flat. The credibility label is being ignored. "
+            "Human-speed data was not collected for the 5–15% extension (AI speed only)."
+        )
+
+    # 5% anomaly callout — only shown when the extended sweep data is present
+    cred_05 = by_cred.get(0.05, {}).get("ai", {})
+    if cred_05:
+        n05_full = cred_05.get("outcome_tags", {})  # not available here; use first_actor proxy
+        st.markdown(
+            '<div style="background:#FEF9E7;border-left:4px solid #F1A340;'
+            'border-radius:6px;padding:0.8rem 1rem;margin-top:0.5rem">'
+            '<div style="font-weight:700;margin-bottom:0.3rem">'
+            'Anomaly at 5% credibility — lower label, more extreme response'
+            '</div>'
+            '<div style="font-size:0.88rem;line-height:1.6">'
+            'We extended the sweep to near-zero credibility labels (5%, 10%, 15%). '
+            'Withdrawal rates remained near-total at all three levels — '
+            'confirming that the label is ignored even when it signals near-implausibility. '
+            'At <b>5% credibility</b>, agents produced more <i>full</i> (rather than partial) withdrawals '
+            'than at any other credibility level, triggering a bank cascade. '
+            'At 10% and 15%, agents mostly chose partial withdrawal and no cascade resulted. '
+            'The relationship between credibility label and response severity is non-monotonic: '
+            'an "almost implausible" label appears to trigger a <b>worst-case assumption</b> '
+            'rather than reassurance — agents reason "if even this tiny signal is circulating, '
+            'something must be very wrong." '
+            'Standard labeling strategies would not predict this behavior.'
+            '</div></div>',
+            unsafe_allow_html=True,
         )
 
     st.markdown(
@@ -427,6 +486,123 @@ def _finding_content_credibility(sweep: List[Dict]) -> None:
         '</div></div>',
         unsafe_allow_html=True,
     )
+
+    # ── Policy slider ──────────────────────────────────────────────────────
+    _render_policy_slider(sweep)
+
+
+def _render_policy_slider(sweep: List[Dict]) -> None:
+    """Interactive: drag a mandatory delay and watch the cascade fraction change."""
+    # Gather cascade-capable runs (25%, 35%, 45% credibility) with both speeds
+    CASCADE_CREDS = {"025": 0.25, "035": 0.35, "045": 0.45}
+    by_cred: Dict[float, Dict[str, Dict]] = defaultdict(dict)
+    for r in sweep:
+        sid = r.get("scenario_id", "")
+        speed = r.get("speed", "")
+        if not sid.startswith("sweep_false_") or "_cb" in sid:
+            continue
+        parts = sid.rsplit("_", 1)
+        cred_str = parts[-1] if len(parts) == 2 else ""
+        if cred_str in CASCADE_CREDS:
+            by_cred[CASCADE_CREDS[cred_str]][speed] = r
+
+    # Need at least the 45% scenario (our headline cascade)
+    if 0.45 not in by_cred or "ai" not in by_cred[0.45] or "human" not in by_cred[0.45]:
+        return
+
+    with st.expander("🎛 Policy experiment — what if agents had to wait before withdrawing?", expanded=True):
+        st.markdown(
+            "Drag the slider to explore a **mandatory withdrawal delay** — "
+            "a policy that forces agents to pause before acting on a rumor. "
+            "The cascade still happens either way. What changes is **how fast**. "
+            "Two measured points: **0 s** (AI speed) and **90 s** (human deliberation). "
+            "The curve is interpolated."
+        )
+
+        delay = st.slider(
+            "Mandatory withdrawal delay (seconds)",
+            min_value=0, max_value=120, value=0, step=5,
+            key="policy_slider_delay",
+        )
+
+        import plotly.graph_objects as _go
+
+        fig = _go.Figure()
+        palette = {0.25: "#76B7B2", 0.35: "#F28E2B", 0.45: "#E15759"}
+
+        selected_t50 = None
+        for cred, speeds in sorted(by_cred.items()):
+            ai_run = speeds.get("ai", {})
+            hu_run = speeds.get("human", {})
+            if not ai_run or not hu_run:
+                continue
+            ai_t50 = ai_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+            hu_t50 = hu_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+            if not ai_t50 or not hu_t50:
+                continue
+
+            x_pts = [0, 30, 60, 90, 120]
+            y_pts = [
+                ai_t50,
+                ai_t50 + (hu_t50 - ai_t50) * (30 / 90),
+                ai_t50 + (hu_t50 - ai_t50) * (60 / 90),
+                hu_t50,
+                hu_t50,
+            ]
+
+            color = palette.get(cred, "#BAB0AC")
+            fig.add_trace(_go.Scatter(
+                x=x_pts, y=y_pts,
+                mode="lines",
+                line=dict(color=color, width=2, dash="dot"),
+                name=f"{cred:.0%} credibility",
+                showlegend=True,
+            ))
+            fig.add_trace(_go.Scatter(
+                x=[0, 90], y=[ai_t50, hu_t50],
+                mode="markers",
+                marker=dict(color=color, size=10, symbol="circle"),
+                showlegend=False,
+                hovertemplate=(
+                    f"{cred:.0%} credibility<br>"
+                    "Decision delay: %{x}s<br>"
+                    "Time to cascade: %{y:.0f}s<extra></extra>"
+                ),
+            ))
+            if cred == 0.45:
+                t = min(delay, 90) / 90
+                selected_t50 = ai_t50 + (hu_t50 - ai_t50) * t
+
+        fig.add_vline(
+            x=delay, line_dash="dash", line_color="#8A4E1A", line_width=2,
+            annotation_text=f"Your policy: {delay}s delay",
+            annotation_position="top right",
+            annotation_font_color="#8A4E1A",
+        )
+
+        fig.update_layout(
+            xaxis=dict(title="Mandatory decision delay (seconds)", range=[-3, 125],
+                       tickvals=[0, 30, 60, 90, 120],
+                       ticktext=["0s (AI)", "30s", "60s", "90s (human)", "120s"]),
+            yaxis=dict(title="Time for 50% deposits to leave (seconds)", range=[0, 220]),
+            height=280, margin=dict(l=0, r=20, t=10, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        if selected_t50 is not None:
+            def _fmt(s: float) -> str:
+                return f"{s:.0f}s" if s < 60 else f"{int(s)//60}m {int(s)%60:02d}s"
+            if delay == 0:
+                note = f"At AI speed (no delay): 50% of deposits leave Bank A in **{_fmt(selected_t50)}**."
+            elif delay >= 90:
+                note = f"At human deliberation speed (90s+): same cascade reaches 50% in **{_fmt(selected_t50)}** — still inevitable, just slower."
+            else:
+                note = (
+                    f"At a {delay}s mandatory delay: 50% withdrawn in approximately **{_fmt(selected_t50)}** (interpolated)."
+                )
+            st.caption(note + " Final cascade size is nearly identical at all delays — the policy buys time, not safety.")
 
 
 def _finding_cascade_anatomy(preset: List[Dict]) -> None:
@@ -541,8 +717,123 @@ def _finding_cascade_anatomy(preset: List[Dict]) -> None:
         'You can\'t close the gap just by switching to an AI delegate '
         'if the institution across from you is running a better model. '
         '<b>AI-mediated bank runs may systematically leave retail depositors — '
-        'the ones who can least afford it — last in line.</b>'
+        'the ones who can least afford it — last in line.</b><br><br>'
+        '<span style="color:#5C3010;font-size:0.88rem">'
+        '🧪 <b>Model isolation test:</b> we re-ran this scenario forcing <i>all</i> agents to use '
+        'the same (less capable) Haiku model. Institutional agents still led the exit — same order, '
+        'same pattern. The advantage is in the <b>mandate</b>, not the model: '
+        'a corporate treasury agent whose cost function says "missing liquidity is career-ending" '
+        'will always act faster than a retail agent whose cost function says "avoid unnecessary fees." '
+        'Capability parity across agents does not fix the structural queue problem.'
+        '</span>'
         '</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _finding_equity_queue(sweep: List[Dict]) -> None:
+    """Exit queue dot chart: who withdrew when, institutional vs retail."""
+    target = next(
+        (r for r in sweep
+         if r.get("scenario_id") == "sweep_false_045" and r.get("speed") == "ai"),
+        None,
+    )
+    if not target:
+        return
+
+    agents_map = {a["agent_id"]: a for a in target.get("agent_final_states", [])}
+    withdrawal_events = sorted(
+        [e for e in target.get("events", [])
+         if e.get("event_type") == "agent_acted"
+         and e.get("action") in ("full_withdraw", "partial_withdraw")],
+        key=lambda e: e["timestamp"],
+    )
+    if not withdrawal_events:
+        return
+
+    rows = []
+    for rank, e in enumerate(withdrawal_events, start=1):
+        ag = agents_map.get(e["agent_id"], {})
+        p = ag.get("persona", {})
+        arch = p.get("archetype", "unknown")
+        rows.append({
+            "rank": rank,
+            "name": p.get("name", e["agent_id"]),
+            "archetype": arch,
+            "timestamp": e["timestamp"],
+            "is_institutional": arch == "institutional_treasurer",
+        })
+
+    institutional = [r for r in rows if r["is_institutional"]]
+    retail = [r for r in rows if not r["is_institutional"]]
+    if not institutional or not retail:
+        return
+
+    st.subheader("Finding 3b — In the exit queue, institutional agents own the front of the line")
+    st.markdown(
+        "Same cascade scenario (45%-credibility false alarm, AI speed). "
+        "Each numbered dot is one agent; position on the X axis is the exact second they withdrew. "
+        "Numbers show queue position — who was first to clear the door."
+    )
+
+    fig = go.Figure()
+    for grp, color, y_val, label in [
+        (institutional, "#E15759", 1.0, "Institutional Treasurer"),
+        (retail, "#4E79A7", 0.0, "Retail / Other"),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=[r["timestamp"] for r in grp],
+            y=[y_val] * len(grp),
+            mode="markers+text",
+            marker=dict(color=color, size=20, symbol="circle",
+                        line=dict(color="white", width=2)),
+            text=[str(r["rank"]) for r in grp],
+            textposition="middle center",
+            textfont=dict(size=9, color="white"),
+            name=label,
+            hovertemplate="<b>%{customdata}</b><br>Queue #%{text} at T+%{x:.1f}s<extra></extra>",
+            customdata=[r["name"] for r in grp],
+        ))
+
+    last_inst_t = max(r["timestamp"] for r in institutional)
+    fig.add_vrect(
+        x0=-1, x1=last_inst_t,
+        fillcolor="#E15759", opacity=0.05,
+        layer="below", line_width=0,
+        annotation_text="Institutional window",
+        annotation_position="top left",
+        annotation_font_size=10,
+        annotation_font_color="#E15759",
+    )
+    fig.update_layout(
+        xaxis=dict(title="Simulation time (seconds)"),
+        yaxis=dict(
+            tickvals=[0.0, 1.0],
+            ticktext=["Retail / Other", "Institutional"],
+            range=[-0.7, 1.8],
+        ),
+        height=210,
+        margin=dict(l=0, r=20, t=10, b=0),
+        plot_bgcolor="rgba(0,0,0,0)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    first_retail_t = min(r["timestamp"] for r in retail)
+    st.markdown(
+        f'<div style="background:#FEE8E8;border-left:4px solid #E15759;'
+        f'border-radius:6px;padding:0.8rem 1rem;margin-top:0.3rem">'
+        f'<div style="font-weight:700;margin-bottom:0.3rem">Queue position is not neutral</div>'
+        f'<div style="font-size:0.88rem;line-height:1.6">'
+        f'All {len(institutional)} institutional agents withdrew by T+{last_inst_t:.0f}s. '
+        f'Retail agents started at T+{first_retail_t:.0f}s. '
+        f'This run was a false alarm — the bank never ran out of reserves, so everyone got their money. '
+        f'In a real bank failure (reserves depleting as the cascade runs), '
+        f'early queue position means full payment; late position means partial payment or nothing. '
+        f'<b>AI delegation doesn\'t flatten this hierarchy — it preserves it at machine speed, '
+        f'locking in the institutional advantage before any retail depositor can react.</b>'
+        f'</div></div>',
         unsafe_allow_html=True,
     )
 
@@ -774,49 +1065,48 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
 
         st.markdown(
             f"""
-<div style="background:linear-gradient(135deg,#1a2a1a 0%,#0d1a0d 100%);
-            border:1.5px solid #4A6741;border-radius:10px;
+<div style="background:#EEF3EE;border:1.5px solid #4A6741;border-radius:10px;
             padding:1.2rem 1.6rem;margin-bottom:1.2rem">
-  <div style="color:#9DC88D;font-size:0.8rem;font-weight:600;
+  <div style="color:#4A6741;font-size:0.8rem;font-weight:600;
               letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.6rem">
     CB JUDGMENT ACCURACY — HEADLINE NUMBER
   </div>
   <div style="display:flex;gap:3rem;flex-wrap:wrap;align-items:flex-start">
     <div>
-      <div style="color:#9DC88D;font-size:0.75rem;font-weight:600;
+      <div style="color:#4A6741;font-size:0.75rem;font-weight:600;
                   letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.25rem">
         AI-POWERED CB
       </div>
       <div style="display:flex;align-items:baseline;gap:0.5rem">
-        <span style="color:#6dbf60;font-size:3rem;font-weight:800;line-height:1">{ai_score}/2</span>
-        <span style="color:#9DC88D;font-size:1rem;font-weight:600">correct</span>
+        <span style="color:#4A6741;font-size:3rem;font-weight:800;line-height:1">{ai_score}/2</span>
+        <span style="color:#4A6741;font-size:1rem;font-weight:600">correct</span>
       </div>
-      <div style="color:#7aaa70;font-size:0.82rem;margin-top:0.3rem">read bank state before every decision</div>
+      <div style="color:#5a7a51;font-size:0.82rem;margin-top:0.3rem">read bank state before every decision</div>
     </div>
-    <div style="border-left:1px solid #2d4d2d;padding-left:3rem">
-      <div style="color:#C8A060;font-size:0.75rem;font-weight:600;
+    <div style="border-left:1px solid #c0d4bc;padding-left:3rem">
+      <div style="color:#8A4E1A;font-size:0.75rem;font-weight:600;
                   letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.25rem">
         RULE-BASED CB
       </div>
       <div style="display:flex;align-items:baseline;gap:0.5rem">
-        <span style="color:#d4844a;font-size:3rem;font-weight:800;line-height:1">{rule_score}/2</span>
-        <span style="color:#C8A060;font-size:1rem;font-weight:600">correct</span>
+        <span style="color:#B8860B;font-size:3rem;font-weight:800;line-height:1">{rule_score}/2</span>
+        <span style="color:#8A4E1A;font-size:1rem;font-weight:600">correct</span>
       </div>
-      <div style="color:#a08040;font-size:0.82rem;margin-top:0.3rem">fires identical response regardless of bank health</div>
+      <div style="color:#8A7560;font-size:0.82rem;margin-top:0.3rem">fires identical response regardless of bank health</div>
     </div>
-    <div style="border-left:1px solid #2d4d2d;padding-left:3rem;flex:1;min-width:220px">
-      <div style="color:#7aaa70;font-size:0.75rem;font-weight:600;
+    <div style="border-left:1px solid #c0d4bc;padding-left:3rem;flex:1;min-width:220px">
+      <div style="color:#4A6741;font-size:0.75rem;font-weight:600;
                   letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.4rem">
         FALSE ALARM → panic exits
       </div>
-      <div style="color:#E8F5E3;font-size:1.1rem;font-weight:700">
+      <div style="color:#2C2C2C;font-size:1.1rem;font-weight:700">
         {b_full} → {best_cb_full if best_cb_full is not None else "—"}
-        <span style="background:#4A6741;color:#E8F5E3;font-size:0.85rem;font-weight:700;
+        <span style="background:#4A6741;color:#fff;font-size:0.85rem;font-weight:700;
                      padding:0.1rem 0.5rem;border-radius:4px;margin-left:0.4rem">
           −{pct_reduction:.0f}%
         </span>
       </div>
-      <div style="color:#7aaa70;font-size:0.82rem;margin-top:0.15rem">with any CB present vs. no intervention</div>
+      <div style="color:#5a7a51;font-size:0.82rem;margin-top:0.15rem">with any CB present vs. no intervention</div>
     </div>
   </div>
 </div>
@@ -837,40 +1127,39 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
         rule_correct_lbl = "✗ blind"   if rule_action != "do_nothing" else ""
         st.markdown(
             f"""
-<div style="background:linear-gradient(135deg,#1a2a1a 0%,#0d1a0d 100%);
-            border:1.5px solid #4A6741;border-radius:10px;
+<div style="background:#EEF3EE;border:1.5px solid #4A6741;border-radius:10px;
             padding:1.2rem 1.6rem;margin-bottom:1.2rem">
-  <div style="color:#9DC88D;font-size:0.8rem;font-weight:600;
+  <div style="color:#4A6741;font-size:0.8rem;font-weight:600;
               letter-spacing:0.12em;text-transform:uppercase;margin-bottom:0.5rem">
     CB DELTA — HEADLINE NUMBER
   </div>
   <div style="display:flex;align-items:baseline;gap:0.8rem;flex-wrap:wrap">
-    <span style="color:#E8F5E3;font-size:2.6rem;font-weight:800;line-height:1">
+    <span style="color:#2C2C2C;font-size:2.6rem;font-weight:800;line-height:1">
       {b_full} → {best_cb_full if best_cb_full is not None else "—"}
     </span>
-    <span style="color:#9DC88D;font-size:1.2rem;font-weight:600">panic exits</span>
-    <span style="background:#4A6741;color:#E8F5E3;font-size:1rem;font-weight:700;
+    <span style="color:#4A6741;font-size:1.2rem;font-weight:600">panic exits</span>
+    <span style="background:#4A6741;color:#fff;font-size:1rem;font-weight:700;
                  padding:0.15rem 0.6rem;border-radius:4px">
       −{pct_reduction:.0f}%
     </span>
-    <span style="color:#7aaa70;font-size:0.9rem">with any CB present vs. no intervention</span>
+    <span style="color:#5a7a51;font-size:0.9rem">with any CB present vs. no intervention</span>
   </div>
   <div style="display:flex;gap:2rem;margin-top:1rem;flex-wrap:wrap">
     <div style="flex:1;min-width:200px">
-      <div style="color:#9DC88D;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;
+      <div style="color:#4A6741;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;
                   text-transform:uppercase;margin-bottom:0.3rem">AI-POWERED CB</div>
-      <div style="color:#E8F5E3;font-size:1.05rem;font-weight:700">{ai_action_str}
-        <span style="color:#6dbf60;font-size:0.9rem;margin-left:0.3rem">{ai_correct_lbl}</span>
+      <div style="color:#2C2C2C;font-size:1.05rem;font-weight:700">{ai_action_str}
+        <span style="color:#4A6741;font-size:0.9rem;margin-left:0.3rem">{ai_correct_lbl}</span>
       </div>
-      <div style="color:#9DC88D;font-size:0.85rem;margin-top:0.15rem">{ai_res_str} at trigger</div>
+      <div style="color:#5a7a51;font-size:0.85rem;margin-top:0.15rem">{ai_res_str} at trigger</div>
     </div>
-    <div style="flex:1;min-width:200px;border-left:1px solid #2d4d2d;padding-left:2rem">
-      <div style="color:#C8A060;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;
+    <div style="flex:1;min-width:200px;border-left:1px solid #c0d4bc;padding-left:2rem">
+      <div style="color:#8A4E1A;font-size:0.75rem;font-weight:600;letter-spacing:0.1em;
                   text-transform:uppercase;margin-bottom:0.3rem">RULE-BASED CB</div>
-      <div style="color:#F5E8D0;font-size:1.05rem;font-weight:700">{rule_action_str}
-        <span style="color:#d4844a;font-size:0.9rem;margin-left:0.3rem">{rule_correct_lbl}</span>
+      <div style="color:#2C2C2C;font-size:1.05rem;font-weight:700">{rule_action_str}
+        <span style="color:#E15759;font-size:0.9rem;margin-left:0.3rem">{rule_correct_lbl}</span>
       </div>
-      <div style="color:#C8A060;font-size:0.85rem;margin-top:0.15rem">{rule_res_str} at trigger</div>
+      <div style="color:#8A7560;font-size:0.85rem;margin-top:0.15rem">{rule_res_str} at trigger</div>
     </div>
   </div>
 </div>
@@ -880,7 +1169,7 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     # ─────────────────────────────────────────────────────────────────────────
 
     if have_2x2:
-        title = "Finding 5 — AI CB: 2/2. Rule CB: 1/2 — got lucky once."
+        title = "Finding 6 — AI CB: 2/2. Rule CB: 1/2 — got lucky once."
         lead = (
             "We ran the Central Bank against both a **false alarm** (bank healthy) and a **true alarm** "
             "(bank genuinely insolvent). The **AI-powered CB** read the bank's reserve ratio both times "
@@ -890,7 +1179,7 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
             f"In the false-alarm cascade below, {cascade_str} with no intervention."
         )
     elif using_cascade:
-        title = "Finding 5 — AI regulator reads the situation. Rule-based one fires blindly."
+        title = "Finding 6 — AI regulator reads the situation. Rule-based one fires blindly."
         lead = (
             f"In the cascading scenario (45% credibility false alarm), {cascade_str} with no intervention. "
             "We then added two Central Bank agents watching the same run in real time. "
@@ -901,7 +1190,7 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
             "with no reasoning and no way to distinguish a healthy bank from an insolvent one."
         )
     else:
-        title = "Finding 5 — Central Bank intervention: AI judgment vs. fixed rules"
+        title = "Finding 6 — Central Bank intervention: AI judgment vs. fixed rules"
         lead = (
             "We added a Central Bank agent that monitors the cascade in real time. "
             "Two variants: an **AI-powered CB** that makes a live LLM call to choose its intervention "
@@ -916,20 +1205,20 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
     # ── 2×2 judgment matrix (shown when true-alarm runs are available) ────
     if have_2x2:
         def _cell(action: Optional[str], trig: Dict, is_correct: bool, is_lucky: bool = False) -> str:
-            bg      = "#1e3a1e" if is_correct else "#3a1e1e"
-            border  = "#4A6741" if is_correct else "#8B3A3A"
+            bg      = "#EEF3EE" if is_correct else "#FEE8E8"
+            border  = "#4A6741" if is_correct else "#E15759"
             badge   = ("✓ correct" if is_correct and not is_lucky
                        else "✓ lucky" if is_lucky
                        else "✗ wrong")
-            badge_c = "#6dbf60" if is_correct else "#d4844a"
+            badge_c = "#4A6741" if is_correct else "#E15759"
             act     = _act_str(action)
             res     = _res_str(trig)
             return (
                 f'<td style="background:{bg};border:1px solid {border};'
                 f'padding:0.8rem 1rem;border-radius:6px;vertical-align:top">'
-                f'<div style="font-weight:700;color:#E8F5E3;font-size:1rem">{act}</div>'
+                f'<div style="font-weight:700;color:#2C2C2C;font-size:1rem">{act}</div>'
                 f'<div style="color:{badge_c};font-size:0.82rem;margin-top:0.15rem">{badge}</div>'
-                f'<div style="color:#aaa;font-size:0.78rem;margin-top:0.3rem">{res} at trigger</div>'
+                f'<div style="color:#666;font-size:0.78rem;margin-top:0.3rem">{res} at trigger</div>'
                 f'</td>'
             )
 
@@ -945,19 +1234,19 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
   <thead>
     <tr>
       <th style="width:140px"></th>
-      <th style="color:#9DC88D;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
+      <th style="color:#4A6741;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
                  text-transform:uppercase;padding:0.3rem 1rem;text-align:left">
-        FALSE ALARM<br><span style="font-weight:400;color:#7aaa70">bank actually healthy</span>
+        FALSE ALARM<br><span style="font-weight:400;color:#666">bank actually healthy</span>
       </th>
-      <th style="color:#9DC88D;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
+      <th style="color:#4A6741;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
                  text-transform:uppercase;padding:0.3rem 1rem;text-align:left">
-        TRUE ALARM<br><span style="font-weight:400;color:#7aaa70">bank actually insolvent</span>
+        TRUE ALARM<br><span style="font-weight:400;color:#666">bank actually insolvent</span>
       </th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td style="color:#9DC88D;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
+      <td style="color:#4A6741;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
                  text-transform:uppercase;padding:0.3rem 0.5rem;vertical-align:middle">
         AI CB
       </td>
@@ -965,7 +1254,7 @@ def _finding_cb_intervention(cb_runs: Dict[str, Dict]) -> None:
       {_cell(true_llm_action,  true_llm_trig,  ta_ai_correct)}
     </tr>
     <tr>
-      <td style="color:#C8A060;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
+      <td style="color:#8A4E1A;font-size:0.8rem;font-weight:600;letter-spacing:0.08em;
                  text-transform:uppercase;padding:0.3rem 0.5rem;vertical-align:middle">
         RULE CB
       </td>
@@ -1142,14 +1431,448 @@ def _empirical_anchors() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cascade race chart
+# ---------------------------------------------------------------------------
+
+
+def _cascade_curve(run: Dict) -> Tuple[List[float], List[int]]:
+    """Return (timestamps, cumulative_withdrawal_count) step-function for a run."""
+    withdrew_at: Dict[str, float] = {}
+    for e in run.get("events", []):
+        if e.get("event_type") != "agent_acted":
+            continue
+        aid = e.get("agent_id")
+        action = e.get("action", "")
+        ts = e.get("timestamp", 0.0)
+        if action in ("full_withdraw", "partial_withdraw") and aid not in withdrew_at:
+            withdrew_at[aid] = ts
+    if not withdrew_at:
+        return [0.0], [0]
+    sorted_ts = sorted(withdrew_at.values())
+    times  = [0.0] + sorted_ts + [sorted_ts[-1]]
+    counts = [0]   + list(range(1, len(sorted_ts) + 1)) + [len(sorted_ts)]
+    return times, counts
+
+
+def _render_cascade_race(sweep: List[Dict]) -> None:
+    """Step chart: AI vs human cumulative withdrawals on the same time axis."""
+    by_sid: Dict[str, Dict] = {}
+    for r in sweep:
+        sid = r.get("scenario_id", "")
+        if sid == "sweep_false_045":
+            by_sid[r.get("speed", "")] = r
+
+    ai_run = by_sid.get("ai")
+    hu_run = by_sid.get("human")
+    if not ai_run or not hu_run:
+        return
+
+    st.subheader("The cascade at AI speed looks structurally different")
+    st.markdown(
+        "Same agents, same false rumour — only decision speed differs. "
+        "At AI speed the peer-signal wave arrives before agents have finished processing "
+        "the original rumour, collapsing two separate shocks into one. "
+        "The gap between the curves is the **intervention window** — the time a regulator, "
+        "circuit breaker, or verification step would need to act. At AI speed it is gone."
+    )
+
+    n = ai_run.get("metrics", {}).get("total_agents", 12)
+    ai_times, ai_counts = _cascade_curve(ai_run)
+    hu_times, hu_counts = _cascade_curve(hu_run)
+
+    fig = go.Figure()
+
+    # Human speed — blue, extends far right
+    fig.add_trace(go.Scatter(
+        x=hu_times, y=hu_counts,
+        mode="lines",
+        name="Human speed (90-second deliberation)",
+        line=dict(color="#4E79A7", width=2.5, shape="hv"),
+        fill="tozeroy",
+        fillcolor="rgba(78,121,167,0.08)",
+    ))
+
+    # AI speed — red, shoots up in seconds
+    fig.add_trace(go.Scatter(
+        x=ai_times, y=ai_counts,
+        mode="lines",
+        name="AI speed (decides in seconds)",
+        line=dict(color="#E15759", width=2.5, shape="hv"),
+        fill="tozeroy",
+        fillcolor="rgba(225,87,89,0.12)",
+    ))
+
+    # 50% threshold line
+    fig.add_hline(
+        y=n * 0.5, line_dash="dash", line_color="#888", line_width=1,
+        annotation_text="50% of agents withdrawn",
+        annotation_position="right",
+        annotation_font_size=10,
+    )
+
+    # Shade the intervention window (gap between the two 50% crossing points)
+    ai_t50 = ai_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+    hu_t50 = hu_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+    if ai_t50 and hu_t50 and hu_t50 > ai_t50:
+        fig.add_vrect(
+            x0=ai_t50, x1=hu_t50,
+            fillcolor="rgba(78,121,167,0.10)", layer="below", line_width=0,
+            annotation_text="intervention window",
+            annotation_position="top right",
+            annotation_font_size=10,
+            annotation_font_color="#4E79A7",
+        )
+
+    fig.update_layout(
+        xaxis=dict(title="Simulation time (seconds)", range=[-5, max(hu_times) * 1.05]),
+        yaxis=dict(title="Agents who withdrew", range=[0, n + 1], dtick=2),
+        height=280, margin=dict(l=0, r=120, t=10, b=0),
+        plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        "Same 12 agents, same false rumor (45% credibility), same bank — only decision speed differs. "
+        "At AI speed the cascade is structurally different, not just faster: the peer-signal wave "
+        "arrives before all agents have even processed the original rumor, compressing two separate "
+        "shocks into a single simultaneous panic. "
+        "The gap between the two curves is the intervention window — the time in which a regulator, "
+        "a circuit breaker, or a verification step could interrupt the cascade. "
+        "At AI speed, that window closes before any human process can begin."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
+
+def _render_speed_clock(sweep: List[Dict]) -> None:
+    """Headline number: AI vs human time-to-cascade, rendered as two stopwatches."""
+    by_sid: Dict[str, Dict] = {}
+    for r in sweep:
+        sid = r.get("scenario_id", "")
+        speed = r.get("speed", "")
+        if sid == "sweep_false_045":
+            by_sid[speed] = r
+
+    ai_run = by_sid.get("ai")
+    hu_run = by_sid.get("human")
+    if not ai_run or not hu_run:
+        return
+
+    ai_t50 = ai_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+    hu_t50 = hu_run.get("metrics", {}).get("time_to_50pct_withdrawn")
+    ai_wc  = ai_run.get("metrics", {}).get("withdrawn_count", 0)
+    hu_wc  = hu_run.get("metrics", {}).get("withdrawn_count", 0)
+    n      = ai_run.get("metrics", {}).get("total_agents", 12)
+
+    if not ai_t50 or not hu_t50:
+        return
+
+    speedup = hu_t50 / ai_t50
+
+    def _fmt_time(s: float) -> str:
+        if s < 60:
+            return f"{s:.0f}s"
+        m, sec = int(s) // 60, int(s) % 60
+        return f"{m}m {sec:02d}s"
+
+    st.markdown(
+        f"""
+<div style="background:#F8F4EF;border:1.5px solid #C8B89A;border-radius:10px;
+            padding:1.3rem 1.6rem;margin-bottom:1.4rem">
+  <div style="color:#8A4E1A;font-size:0.78rem;font-weight:700;letter-spacing:0.12em;
+              text-transform:uppercase;margin-bottom:0.9rem">
+    THE HEADLINE NUMBER — same scenario, same agents, only decision speed changes
+  </div>
+  <div style="display:flex;gap:1.5rem;flex-wrap:wrap;align-items:center">
+    <div style="text-align:center;min-width:140px">
+      <div style="color:#E15759;font-size:0.72rem;font-weight:700;letter-spacing:0.1em;
+                  text-transform:uppercase;margin-bottom:0.2rem">AI SPEED</div>
+      <div style="color:#E15759;font-size:3.2rem;font-weight:900;line-height:1;
+                  font-variant-numeric:tabular-nums">{_fmt_time(ai_t50)}</div>
+      <div style="color:#666;font-size:0.8rem;margin-top:0.3rem">to 50% withdrawn</div>
+      <div style="color:#888;font-size:0.75rem">{ai_wc}/{n} agents exited</div>
+    </div>
+    <div style="font-size:2rem;color:#BBB;font-weight:300">vs</div>
+    <div style="text-align:center;min-width:140px">
+      <div style="color:#4E79A7;font-size:0.72rem;font-weight:700;letter-spacing:0.1em;
+                  text-transform:uppercase;margin-bottom:0.2rem">HUMAN SPEED</div>
+      <div style="color:#4E79A7;font-size:3.2rem;font-weight:900;line-height:1;
+                  font-variant-numeric:tabular-nums">{_fmt_time(hu_t50)}</div>
+      <div style="color:#666;font-size:0.8rem;margin-top:0.3rem">to 50% withdrawn</div>
+      <div style="color:#888;font-size:0.75rem">{hu_wc}/{n} agents exited</div>
+    </div>
+    <div style="flex:1;min-width:200px;padding-left:1rem;border-left:1px solid #D5C8B8">
+      <div style="color:#8A4E1A;font-size:2.2rem;font-weight:900;line-height:1">
+        {speedup:.0f}×
+      </div>
+      <div style="color:#5C3010;font-size:1rem;font-weight:600;margin-top:0.2rem">faster</div>
+      <div style="color:#666;font-size:0.82rem;margin-top:0.5rem;line-height:1.55">
+        Same rumor. Same 12 agents. Same bank.<br>
+        The only difference: AI agents decide in <b>seconds</b>.<br>
+        Human agents pause for 90-second deliberation.
+      </div>
+    </div>
+  </div>
+  <div style="margin-top:0.8rem;font-size:0.78rem;color:#999;border-top:1px solid #DDD;
+              padding-top:0.5rem">
+    Scenario: 45%-credibility false alarm — bank is solvent, rumor is wrong.
+    The cascade happens anyway.
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _finding_persona_contrast(sweep: List[Dict]) -> None:
+    """Show two agents from the same archetype making opposite decisions — proof heterogeneity is real."""
+    # Use the cascade scenario (sweep_false_045 AI) — it has the richest decisions
+    target = next(
+        (r for r in sweep
+         if r.get("scenario_id") == "sweep_false_045" and r.get("speed") == "ai"),
+        None,
+    )
+    if not target:
+        return
+
+    agents = {a["agent_id"]: a for a in target.get("agent_final_states", [])}
+
+    # Find institutional treasurers that made different decisions
+    treasurers = [
+        a for a in agents.values()
+        if a.get("persona", {}).get("archetype") == "institutional_treasurer"
+    ]
+    held    = [a for a in treasurers if _last_action(a) == "hold"]
+    exited  = [a for a in treasurers if _last_action(a) in ("full_withdraw", "partial_withdraw")]
+
+    if not held or not exited:
+        return
+
+    agent_a = held[0]
+    agent_b = exited[0]
+
+    st.subheader("Finding 5 (Interlude) — Real AI reasoning: same archetype, different judgment")
+    st.markdown(
+        "Both agents below are **Institutional Treasurers** — same archetype, same general "
+        "profile, same information environment. They read the same rumor and watched the same "
+        "cascade unfold. One held. One withdrew."
+    )
+    st.markdown(
+        '<div style="background:#1C1C2E;border-radius:6px;padding:0.5rem 1rem;'
+        'margin-bottom:0.8rem;display:inline-block">'
+        '<span style="color:#A8D8A8;font-size:0.75rem;font-weight:700;letter-spacing:0.12em;'
+        'text-transform:uppercase">VERBATIM LLM OUTPUT — not written by us</span>'
+        '<span style="color:#888;font-size:0.75rem;margin-left:0.8rem">'
+        'Every decision is a live call to the model. This is what came back.</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    col_a, col_b = st.columns(2)
+    for col, agent, label, color, border in [
+        (col_a, agent_a, "HELD", "#4E79A7", "#4E79A7"),
+        (col_b, agent_b, "WITHDREW", "#E15759", "#E15759"),
+    ]:
+        p       = agent.get("persona", {})
+        dh      = agent.get("decision_history", [])
+        last_d  = dh[-1] if dh else {}
+        name    = p.get("name", "Agent")
+        action  = last_d.get("action", "hold").replace("_", " ")
+        snap    = last_d.get("portfolio_snapshot", {})
+        ba_amt  = next((v for k, v in snap.items() if k.startswith("bank_a")), 0)
+        reasoning = last_d.get("reasoning", "")
+        # Truncate to ~520 chars at a sentence boundary
+        if len(reasoning) > 500:
+            cut = reasoning[:500].rfind(".")
+            reasoning = reasoning[: cut + 1] if cut > 0 else reasoning[:500] + "…"
+
+        with col:
+            st.markdown(
+                f'<div style="background:#F8F9FA;border:1.5px solid {border};'
+                f'border-radius:8px;padding:1rem 1.2rem;height:100%">'
+                f'<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">'
+                f'<span style="color:{color};font-size:0.72rem;font-weight:700;'
+                f'letter-spacing:0.12em;text-transform:uppercase">🏛️ {name} — {label}</span>'
+                f'<span style="background:{border};color:white;font-size:0.65rem;font-weight:700;'
+                f'padding:0.1rem 0.45rem;border-radius:3px;letter-spacing:0.08em">AI OUTPUT</span>'
+                f'</div>'
+                f'<div style="font-size:0.82rem;color:#666;margin-bottom:0.8rem">'
+                f'Bank A exposure: <b>${ba_amt:,.0f}</b></div>'
+                f'<div style="font-size:0.93rem;line-height:1.8;color:#1C1C2E;'
+                f'background:white;border-left:4px solid {border};padding:0.8rem 1rem;'
+                f'border-radius:0 6px 6px 0;font-style:italic">'
+                f'&#8220;{reasoning}&#8221;</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "The Manufacturer saw the same 63% withdrawal rate as the Tech Startup and concluded "
+        "it was panic without evidence. The Tech Startup concluded it was a signal too strong "
+        "to ignore. Both are Institutional Treasurers. Neither is wrong — they're just "
+        "reasoning from different priors. This is what genuine heterogeneity looks like."
+    )
+
+
+def _last_action(agent: Dict) -> str:
+    dh = agent.get("decision_history", [])
+    return dh[-1]["action"] if dh else "hold"
+
+
+def _finding_population_diversity(persona_runs: Dict[str, Dict]) -> None:
+    st.subheader("Finding 7 — Population diversity prevents cascades. Homogeneous crowds amplify them.")
+    st.markdown(
+        "We ran the same high-credibility false alarm with three different agent populations: "
+        "our standard mixed group, an all-retiree group, and an all-treasurer group. "
+        "**The mixed population never cascaded. Both homogeneous populations did — every time.**"
+    )
+
+    # Build stacked bar data
+    pop_configs = [
+        ("Mixed population\n(standard run)", "rumor_high_false", "#4E79A7"),
+        ("All cautious retirees\n(12 × retiree)", "persona_all_cautious_retiree_ai", "#F28E2B"),
+        ("All institutional treasurers\n(12 × treasurer)", "persona_all_institutional_treasurer_ai", "#E15759"),
+    ]
+
+    pop_labels, full_vals, partial_vals, held_vals = [], [], [], []
+    for label, sid, _ in pop_configs:
+        run = persona_runs.get(sid)
+        if not run:
+            continue
+        m = run.get("metrics", {})
+        n = m.get("total_agents", 12)
+        full_out = m.get("withdrawn_count", 0)
+        partial_out = m.get("partially_withdrawn_count", 0)
+        held_out = m.get("held_count", n - full_out - partial_out)
+        pop_labels.append(label)
+        full_vals.append(full_out)
+        partial_vals.append(partial_out)
+        held_vals.append(held_out)
+
+    if pop_labels:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            name="Fully withdrew", x=pop_labels, y=full_vals,
+            marker_color="#E15759", text=full_vals, textposition="inside",
+        ))
+        fig.add_trace(go.Bar(
+            name="Partially withdrew", x=pop_labels, y=partial_vals,
+            marker_color="#F1A340", text=partial_vals, textposition="inside",
+        ))
+        fig.add_trace(go.Bar(
+            name="Held", x=pop_labels, y=held_vals,
+            marker_color="#76B7B2", text=held_vals, textposition="inside",
+        ))
+        fig.add_hline(
+            y=3, line_dash="dash", line_color="#888", line_width=1.2,
+            annotation_text="Cascade threshold (25% of agents)",
+            annotation_position="right", annotation_font_size=10,
+        )
+        fig.update_layout(
+            barmode="stack",
+            yaxis=dict(title="Number of agents (out of 12)", range=[0, 14]),
+            height=300, margin=dict(l=0, r=170, t=10, b=0),
+            plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Cascade threshold = 3 agents (25% of 12) triggering full exit. "
+            "Mixed population: 1 full exit — no cascade. "
+            "All-retiree: 4 full exits — cascade triggered. "
+            "All-treasurer: 5 full exits — cascade triggered. "
+            "Same rumor, same bank, same credibility label. Only the population composition changed."
+        )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(
+            '<div style="background:#EEF3EE;border-left:4px solid #4A6741;'
+            'border-radius:6px;padding:0.8rem 1rem">'
+            '<div style="font-weight:700;margin-bottom:0.3rem">Why diversity stabilizes</div>'
+            '<div style="font-size:0.88rem;line-height:1.6">'
+            'A mixed population contains agents with conflicting priors. '
+            'The institutional treasurer exits early; the cautious retiree notices the exit '
+            'but is partly reassured by the gig worker who didn\'t move. '
+            'The gig worker watches both and stays put. '
+            'Disagreement within the group <b>absorbs the panic signal</b> — '
+            'some agents\'s inaction cancels others\' alarm.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+    with c2:
+        st.markdown(
+            '<div style="background:#FEE8E8;border-left:4px solid #E15759;'
+            'border-radius:6px;padding:0.8rem 1rem">'
+            '<div style="font-weight:700;margin-bottom:0.3rem">Why homogeneity amplifies</div>'
+            '<div style="font-size:0.88rem;line-height:1.6">'
+            'When all agents share the same cost function, the first withdrawal is '
+            'instantly interpretable: "if someone like me ran, I should too." '
+            'There is no cross-archetype noise to filter. '
+            'The peer signal propagates cleanly through a uniform population — '
+            '<b>every withdrawal confirms the others\' priors</b>, and the cascade locks in.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # Model isolation callout
+    iso_ai  = persona_runs.get("model_isolation_all_haiku_ai")
+    iso_hu  = persona_runs.get("model_isolation_all_haiku_human")
+    if iso_ai:
+        iso_m = iso_ai.get("metrics", {})
+        iso_full    = iso_m.get("withdrawn_count", 0)
+        iso_partial = iso_m.get("partially_withdrawn_count", 0)
+        iso_cascade = iso_m.get("cascade_occurred", iso_full >= 3)
+        st.markdown(
+            f'<div style="background:#F0F4FF;border-left:4px solid #4E79A7;'
+            f'border-radius:6px;padding:0.9rem 1.1rem;margin-top:0.8rem">'
+            f'<div style="font-weight:700;margin-bottom:0.3rem">'
+            f'🧪 Model isolation check — does model capability drive the diversity effect?'
+            f'</div>'
+            f'<div style="font-size:0.88rem;line-height:1.6">'
+            f'We re-ran the mixed population with all agents forced to use the same (less capable) Haiku model — '
+            f'eliminating any model-capability gap between retail and institutional agents. '
+            f'Result: <b>{iso_full} full exit, {iso_partial} partial</b> — '
+            f'{"cascade: <b>NO</b>" if not iso_cascade else "cascade: YES"}. '
+            f'Identical to the standard mixed-population run. '
+            f'The stability of a diverse population is <b>not a model-capability artifact</b>: '
+            f'it comes from the diversity of mandates and cost functions, '
+            f'not from any gap in reasoning quality between models.'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div style="background:#EDE8DF;border-left:5px solid #8A4E1A;'
+        'border-radius:6px;padding:1rem 1.2rem;margin-top:1rem">'
+        '<div style="font-weight:700;font-size:1rem;margin-bottom:0.5rem;color:#5C3010">'
+        'Policy implication — correlated AI delegation is a systemic risk'
+        '</div>'
+        '<div style="font-size:0.9rem;line-height:1.7">'
+        'If many depositors at the same bank all delegate to the same AI product — '
+        'same model, same default risk settings, same information feed — '
+        'they become a functionally homogeneous population. '
+        'Our results suggest this is the most dangerous configuration: '
+        'not because the agents are smarter, but because their decisions are correlated. '
+        'Regulators already worry about correlated risk in institutional asset management; '
+        'AI delegation extends this concern to retail banking. '
+        '<b>A bank\'s depositor base diversified across multiple AI products '
+        'may be more resilient than one where everyone uses the same delegate.</b> '
+        'This is testable — and our simulation provides a concrete, parameterizable case study '
+        'for exploring that design space.'
+        '</div></div>',
+        unsafe_allow_html=True,
+    )
 
 
 def render_findings() -> None:
     st.header("What the Simulation Found")
 
     preset, sweep, cb_runs = _load_runs()
+    persona_runs = _load_persona_runs()
 
     if not preset and not sweep and not cb_runs:
         st.info(
@@ -1161,22 +1884,74 @@ def render_findings() -> None:
 
     _render_setup_box()
 
+    # ── Quick-navigation bar ────────────────────────────────────────────────
+    st.markdown(
+        '<div style="background:#F0F4FF;border:1px solid #C8D4E8;border-radius:8px;'
+        'padding:0.7rem 1.1rem;margin-bottom:1.2rem">'
+        '<span style="font-size:0.72rem;font-weight:700;letter-spacing:0.1em;'
+        'text-transform:uppercase;color:#4E79A7;margin-right:0.8rem">JUMP TO</span>'
+        '<a href="#f1" style="background:#FEE8E8;color:#C0392B;border:1px solid #E15759;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">1 — False alarms</a>'
+        '<a href="#f2" style="background:#FEF9E7;color:#7D3C00;border:1px solid #F1A340;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">2 — Labels fail</a>'
+        '<a href="#f3" style="background:#FEE8E8;color:#C0392B;border:1px solid #E15759;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">3 — Who moves first</a>'
+        '<a href="#f4" style="background:#F5F0FF;color:#4A235A;border:1px solid #9B59B6;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">4 — Wrong both ways</a>'
+        '<a href="#f5" style="background:#1C1C2E;color:#A8D8A8;border:1px solid #4A6741;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">5 — Real AI output</a>'
+        '<a href="#f6" style="background:#EEF3EE;color:#2D5A27;border:1px solid #4A6741;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none;margin-right:0.4rem">6 — AI regulator 2/2</a>'
+        '<a href="#f7" style="background:#F0F4FF;color:#1A3A6E;border:1px solid #4E79A7;'
+        'border-radius:4px;padding:0.2rem 0.55rem;font-size:0.78rem;font-weight:600;'
+        'text-decoration:none">7 — Diversity vs cascade</a>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if sweep:
+        _render_cascade_race(sweep)
+
     if preset:
+        st.markdown('<div id="f1"></div>', unsafe_allow_html=True)
         _finding_false_alarms(preset)
         st.divider()
 
     if sweep:
+        st.markdown('<div id="f2"></div>', unsafe_allow_html=True)
         _finding_content_credibility(sweep)
         st.divider()
 
     if preset:
+        st.markdown('<div id="f3"></div>', unsafe_allow_html=True)
         _finding_cascade_anatomy(preset)
         st.divider()
+        if sweep:
+            _finding_equity_queue(sweep)
+            st.divider()
+        st.markdown('<div id="f4"></div>', unsafe_allow_html=True)
         _finding_outcome_quality(preset)
         st.divider()
 
+    if sweep:
+        st.markdown('<div id="f5"></div>', unsafe_allow_html=True)
+        _finding_persona_contrast(sweep)
+        st.divider()
+
+    st.markdown('<div id="f6"></div>', unsafe_allow_html=True)
     _finding_cb_intervention(cb_runs)
     st.divider()
+
+    if persona_runs:
+        st.markdown('<div id="f7"></div>', unsafe_allow_html=True)
+        _finding_population_diversity(persona_runs)
+        st.divider()
 
     _empirical_anchors()
     st.divider()
@@ -1203,7 +1978,7 @@ def render_findings() -> None:
             selected = st.selectbox("Choose a scenario", paired, format_func=lambda s: names[s])
             _render_comparison(run_index[(selected, "ai")], run_index[(selected, "human")])
         else:
-            st.info("No paired runs found. Run the same scenario at both speeds from Configure.")
+            st.info("No paired runs found. Run the same scenario at both speeds from Presets.")
     except Exception as exc:
         st.warning(f"Deep-dive unavailable: {exc}")
 

@@ -162,7 +162,7 @@ def render_compare() -> None:
     if not paired_sids:
         st.info(
             "No paired runs found. Run the same scenario at both **AI Speed** and "
-            "**Human Speed** from the Configure page, then come back here."
+            "**Human Speed** from the Presets page, then come back here."
         )
         return
 

@@ -83,7 +83,7 @@ def _load_run_file(path: Path) -> None:
 
 
 def render_configure() -> None:
-    st.header("Configure")
+    st.header("Presets")
 
     from src.scenarios.presets import PRESETS
 
@@ -134,17 +134,24 @@ def render_configure() -> None:
                 _cascade = _m.get("cascade_triggered")
                 _cb_type = _m.get("cb_policy_type")
 
+                def _mini(label: str, value: str) -> str:
+                    return (
+                        f'<div style="font-size:0.75rem;color:#888;font-weight:600;'
+                        f'text-transform:uppercase;letter-spacing:0.05em">{label}</div>'
+                        f'<div style="font-size:0.9rem;font-weight:600;color:#222">{value}</div>'
+                    )
+
                 if _cb_type:
                     cols = st.columns(4)
-                    cols[0].metric("Speed", _speed or "—")
-                    cols[1].metric("CB", "🤖 AI" if _cb_type == "llm" else "📋 Rule")
-                    cols[2].metric("Withdrew", f"{_withdrew} / {_total}")
-                    cols[3].metric("Cascade", "🔥 yes" if _cascade else "✓ no")
+                    cols[0].markdown(_mini("Speed", _speed or "—"), unsafe_allow_html=True)
+                    cols[1].markdown(_mini("CB", "🤖 AI" if _cb_type == "llm" else "📋 Rule"), unsafe_allow_html=True)
+                    cols[2].markdown(_mini("Withdrew", f"{_withdrew} / {_total}"), unsafe_allow_html=True)
+                    cols[3].markdown(_mini("Cascade", "🔥 yes" if _cascade else "✓ no"), unsafe_allow_html=True)
                 else:
                     cols = st.columns(3)
-                    cols[0].metric("Speed", _speed or "—")
-                    cols[1].metric("Withdrew", f"{_withdrew} / {_total}")
-                    cols[2].metric("Cascade", "🔥 yes" if _cascade else "✓ no")
+                    cols[0].markdown(_mini("Speed", _speed or "—"), unsafe_allow_html=True)
+                    cols[1].markdown(_mini("Withdrew", f"{_withdrew} / {_total}"), unsafe_allow_html=True)
+                    cols[2].markdown(_mini("Cascade", "🔥 yes" if _cascade else "✓ no"), unsafe_allow_html=True)
 
                 if _desc:
                     st.markdown(
@@ -160,7 +167,7 @@ def render_configure() -> None:
             if st.button("Load and view →", type="primary", use_container_width=False):
                 _load_run_file(selected_run)
                 st.toast(f"Loaded — navigating to Live View")
-                st.session_state.nav_page = "Live View"
+                st.session_state._pending_nav = "Live View"
                 st.rerun()
 
     # ── Run tab ──────────────────────────────────────────────────────────
@@ -180,7 +187,7 @@ def render_configure() -> None:
             )
 
         with col_speed:
-            speed_label = st.radio(
+            speed_label = st.selectbox(
                 "Speed",
                 ["AI Speed", "Human Speed"],
                 help=(
@@ -322,14 +329,15 @@ def _run_and_store(scenario) -> None:
 
         m = result.metrics
         status.success(
-            f"Done — **{m.withdrawn_count}/{m.total_agents}** withdrew · "
+            f"Done — **{m.attempted_exit_count}/{m.total_agents}** tried to exit · "
+            f"**{m.paid_out_count}/{m.total_agents}** got cash · "
             f"Bank A paid out **{m.final_withdrawal_fraction:.1%}** · "
             f"Cascade: **{'YES 🔥' if m.cascade_triggered else 'no'}**"
         )
 
         st.markdown("")
         if st.button("→ Go to Live View", type="primary"):
-            st.session_state.nav_page = "Live View"
+            st.session_state._pending_nav = "Live View"
             st.rerun()
 
     except Exception as exc:

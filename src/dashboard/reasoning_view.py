@@ -477,7 +477,7 @@ def render_inspect() -> None:
 
     run = st.session_state.get("run_result")
     if run is None:
-        st.info("No simulation run yet. Go to **Configure** to run one.")
+        st.info("No simulation run yet. Go to **Presets** to run one.")
         return
 
     agent_states: Dict[str, Dict] = {
@@ -566,16 +566,23 @@ def render_inspect() -> None:
             _render_cb_decision_detail(run, all_events)
             return
 
-        if selected_id is None:
-            hint = " Or click **Central Bank** to read what the AI regulator was thinking." if has_cb else ""
-            st.markdown(
-                '<div style="color:#888;font-size:0.95rem;padding-top:2rem">'
-                'Select an agent from the list to read what they were thinking '
-                f'when they decided what to do with their money.{hint}'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-            return
+        # Auto-select the most interesting agent when none is chosen:
+        # prefer the first mover (earliest withdrawal decision), then any agent.
+        if selected_id is None or selected_id not in agent_states:
+            first_mover_id = None
+            first_mover_ts = float("inf")
+            for e in all_events:
+                if (e.get("event_type") == "agent_acted"
+                        and e.get("action") in ("full_withdraw", "partial_withdraw")):
+                    if e.get("timestamp", float("inf")) < first_mover_ts:
+                        first_mover_ts = e["timestamp"]
+                        first_mover_id = e.get("agent_id")
+            if first_mover_id:
+                st.session_state.selected_agent_id = first_mover_id
+                selected_id = first_mover_id
+            elif agent_states:
+                selected_id = next(iter(agent_states))
+                st.session_state.selected_agent_id = selected_id
 
         agent = agent_states.get(selected_id)
         if agent is None:
