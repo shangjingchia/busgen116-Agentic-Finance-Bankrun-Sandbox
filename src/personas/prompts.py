@@ -144,6 +144,13 @@ def render_decision_user_message(
         f"## What you have just observed\n\n{observation_block}",
     ]
 
+    # Belief state block — injected after observations so the LLM sees the
+    # cumulative evidence before reasoning about what to do
+    if agent.belief_states and (belief := agent.belief_states.get(bank_id_in_focus)):
+        sections.append(
+            f"## Your current read on the situation\n\n{belief.render_for_prompt()}"
+        )
+
     if peer_action_summary:
         sections.append(f"## What you can see other people doing\n\n{peer_action_summary}")
 

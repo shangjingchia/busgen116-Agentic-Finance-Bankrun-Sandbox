@@ -90,4 +90,6 @@ async def test_withdrawal_credits_cash_and_preserves_fee_accounting(tmp_path: Pa
     assert result.metrics.final_withdrawal_fraction == 1.0
     assert result.metrics.attempted_exit_count == 1
     assert result.metrics.paid_out_count == 1
-    assert result.metrics.time_to_50pct_deposits_paid == 0.0
+    # AI speed now adds a small jitter (0.5–3s) so time is non-zero but well within max
+    assert result.metrics.time_to_50pct_deposits_paid is not None
+    assert result.metrics.time_to_50pct_deposits_paid < 10.0

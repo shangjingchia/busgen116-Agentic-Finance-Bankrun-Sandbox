@@ -19,6 +19,7 @@ class EventType(str, Enum):
     SIMULATION_STARTED = "simulation_started"
     SIMULATION_ENDED = "simulation_ended"
     RUMOR_PUBLISHED = "rumor_published"
+    INFORMATION_SIGNAL_PUBLISHED = "information_signal_published"
     AGENT_OBSERVED = "agent_observed"
     AGENT_DECISION_TRIGGERED = "agent_decision_triggered"
     AGENT_ACTED = "agent_acted"
@@ -115,13 +116,31 @@ class BankReserveUpdated(Event):
 
 
 @dataclass
+class InformationSignalPublished(Event):
+    """A structured InformationSignal enters the simulation environment."""
+
+    signal_id: str = ""
+    source_type: str = ""
+    alarm_level: float = 0.0
+    base_credibility: float = 0.5
+    content: str = ""
+    target_bank_id: str = ""
+    propagation_latency_seconds: float = 3.0
+    # serialized archetype_credibility_multipliers and visible_to_archetypes stored
+    # on the originating InformationSignal; pass signal_id for handlers to look up.
+
+
+@dataclass
 class SocialSignalEmitted(Event):
     """Published when an agent acts and the action is visible on the social feed."""
 
     source_agent_id: str = ""
+    source_agent_name: str = ""        # human-readable name for observation rendering
+    source_archetype: str = ""         # archetype tag for peer-matching
     action_event_id: str = ""
     action: str = ""
     bank_id: str = ""
+    reasoning_snippet: str = ""        # first ~80 chars of the agent's reasoning
     visibility: float = 1.0  # fraction of subscribed agents who actually receive it
 
 

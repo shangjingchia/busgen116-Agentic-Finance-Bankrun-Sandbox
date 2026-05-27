@@ -14,6 +14,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from src.core.belief import BeliefState
+
 
 # ---------------------------------------------------------------------------
 # Persona: the heterogeneity layer
@@ -89,6 +91,14 @@ class Persona:
     # to spook (institutional treasurers > retirees > gig workers).
     peer_action_reconsideration_threshold: float = 0.3
 
+    # ---- new fields added in architecture revamp ----
+    # Starting trust in institutions (used to seed BeliefState.trouble_probability)
+    institution_trust_prior: float = 0.5
+    # Base deliberation time in seconds (AI speed uses small jitter; human speed scales this)
+    deliberation_seconds: float = 20.0
+    # Which source_type strings this persona can receive (empty = no filter / all)
+    information_access: List[str] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "archetype": self.archetype,
@@ -106,6 +116,9 @@ class Persona:
             "cost_function": [c.to_dict() for c in self.cost_function],
             "background_narrative": self.background_narrative,
             "peer_action_reconsideration_threshold": self.peer_action_reconsideration_threshold,
+            "institution_trust_prior": self.institution_trust_prior,
+            "deliberation_seconds": self.deliberation_seconds,
+            "information_access": list(self.information_access),
         }
 
 
@@ -241,6 +254,8 @@ class Agent:
     decision_history: List[DecisionRecord] = field(default_factory=list)
     state: AgentState = AgentState.ACTIVE
     outcome_ledger: Optional[OutcomeLedger] = None
+    # Accumulated evidence about each bank; keyed by bank_id
+    belief_states: Dict[str, BeliefState] = field(default_factory=dict)
 
     def total_wealth(self) -> float:
         return sum(self.portfolio.values())
@@ -260,4 +275,5 @@ class Agent:
             "decision_history": [d.to_dict() for d in self.decision_history],
             "state": self.state.value,
             "outcome_ledger": self.outcome_ledger.to_dict() if self.outcome_ledger else None,
+            "belief_states": {k: v.to_dict() for k, v in self.belief_states.items()},
         }

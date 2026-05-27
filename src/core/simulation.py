@@ -42,6 +42,7 @@ from src.core.agent import (
     UnrealizedOutcome,
 )
 from src.core.bank import Bank
+from src.core.belief import BeliefState
 from src.core.event import (
     AgentActed,
     AgentDecisionTriggered,
@@ -51,6 +52,7 @@ from src.core.event import (
     CentralBankTriggered,
     Event,
     EventType,
+    InformationSignalPublished,
     PolicyAnnounced,
     RumorPublished,
     RumorTruthRevealed,
@@ -70,6 +72,7 @@ from src.information.feed import Feed
 from src.information.observation import (
     render_policy_observation,
     render_rumor_observation,
+    render_signal_observation,
     render_social_observation,
 )
 from src.information.rumor import rumor_config_to_event
@@ -238,6 +241,15 @@ class SimulationEngine:
 
         self._feed = Feed(scenario=scenario, agents=agents, rng=self._rng)
 
+        # Initialize per-agent belief states from each persona's trust prior
+        for agent in agents:
+            trust_prior = getattr(agent.persona, "institution_trust_prior", 0.5)
+            for bc in scenario.banks:
+                if any(k.startswith(bc.bank_id + ":") for k in agent.portfolio):
+                    agent.belief_states[bc.bank_id] = BeliefState.initial(
+                        bc.bank_id, trust_prior
+                    )
+
         # Central Bank agent (optional)
         self._cb_triggered: bool = False
         self._cb_agent = None
@@ -257,9 +269,24 @@ class SimulationEngine:
         started_at = datetime.now(timezone.utc)
         t0 = asyncio.get_event_loop().time()
 
-        # Seed the queue with rumor events
+        # Seed the queue with legacy rumor events
         for rumor_config in self._scenario.rumors:
             self._schedule(rumor_config_to_event(rumor_config))
+
+        # Seed the queue with InformationSignal events (new signal stream)
+        for signal in self._scenario.signals:
+            pub = InformationSignalPublished(
+                event_type=EventType.INFORMATION_SIGNAL_PUBLISHED,
+                timestamp=signal.publish_at,
+                signal_id=signal.signal_id,
+                source_type=signal.source_type,
+                alarm_level=signal.alarm_level,
+                base_credibility=signal.base_credibility,
+                content=signal.content,
+                target_bank_id=signal.target_bank_id,
+                propagation_latency_seconds=signal.propagation_latency_seconds,
+            )
+            self._schedule(pub)
 
         sim_time = 0.0
 
@@ -326,6 +353,8 @@ class SimulationEngine:
     def _handle_sync(self, event: Event, sim_time: float) -> List[Event]:
         if isinstance(event, RumorPublished):
             return self._handle_rumor_published(event)
+        elif isinstance(event, InformationSignalPublished):
+            return self._handle_information_signal_published(event)
         elif isinstance(event, AgentObserved):
             return self._handle_agent_observed(event, sim_time)
         elif isinstance(event, AgentActed):
@@ -344,6 +373,12 @@ class SimulationEngine:
         self._event_by_id[event.event_id] = event
         return self._feed.route_rumor(event)
 
+    def _handle_information_signal_published(
+        self, event: InformationSignalPublished
+    ) -> List[Event]:
+        self._event_by_id[event.event_id] = event
+        return self._feed.route_signal(event)
+
     def _handle_agent_observed(self, event: AgentObserved, sim_time: float) -> List[Event]:
         agent = self._agents.get(event.agent_id)
         if agent is None or agent.state == AgentState.WITHDRAWN:
@@ -358,7 +393,7 @@ class SimulationEngine:
         if isinstance(original, RumorPublished):
             obs_str = render_rumor_observation(original)
             self._pending_obs[event.agent_id].append(obs_str)
-            delay = self._decision_delay()
+            delay = self._decision_delay(agent)
             trigger = AgentDecisionTriggered(
                 event_type=EventType.AGENT_DECISION_TRIGGERED,
                 timestamp=event.timestamp + delay,
@@ -369,10 +404,34 @@ class SimulationEngine:
             )
             new_events.append(trigger)
 
+        elif isinstance(original, InformationSignalPublished):
+            # Look up the full InformationSignal to get archetype-aware rendering
+            info_signal = self._feed._signal_map.get(original.signal_id)
+            arch = agent.persona.archetype
+            if info_signal is not None:
+                obs_str = render_signal_observation(info_signal, arch)
+                eff_cred = info_signal.effective_credibility(arch)
+                # Update the agent's belief state for the target bank
+                belief = agent.belief_states.get(original.target_bank_id)
+                if belief is not None:
+                    belief.update(info_signal.alarm_level, eff_cred)
+            else:
+                obs_str = f"[{original.source_type}] {original.content}"
+            self._pending_obs[event.agent_id].append(obs_str)
+            delay = self._decision_delay(agent)
+            trigger = AgentDecisionTriggered(
+                event_type=EventType.AGENT_DECISION_TRIGGERED,
+                timestamp=event.timestamp + delay,
+                agent_id=event.agent_id,
+                trigger_reason="signal_observed",
+                triggering_event_id=event.event_id,
+                bank_id=original.target_bank_id,
+            )
+            new_events.append(trigger)
+
         elif isinstance(original, SocialSignalEmitted):
-            source_agent = self._agents.get(original.source_agent_id)
-            arch = source_agent.persona.archetype if source_agent else "depositor"
-            obs_str = render_social_observation(original, arch)
+            observer_arch = agent.persona.archetype
+            obs_str = render_social_observation(original, observer_arch)
             self._social_details[event.agent_id].append(obs_str)
             self._social_count[event.agent_id] += 1
 
@@ -392,7 +451,7 @@ class SimulationEngine:
                 next_frac = retrigger_tiers[current_tier]
                 if self._social_count[event.agent_id] >= next_frac * max(total_others, 1):
                     self._re_decided_tier[event.agent_id] = current_tier + 1
-                    delay = self._decision_delay()
+                    delay = self._decision_delay(agent)
                     trigger = AgentDecisionTriggered(
                         event_type=EventType.AGENT_DECISION_TRIGGERED,
                         timestamp=event.timestamp + delay,
@@ -409,7 +468,7 @@ class SimulationEngine:
             obs_str = render_policy_observation(original)
             self._pending_obs[event.agent_id].append(obs_str)
             if agent.state != AgentState.WITHDRAWN:
-                delay = self._decision_delay()
+                delay = self._decision_delay(agent)
                 trigger = AgentDecisionTriggered(
                     event_type=EventType.AGENT_DECISION_TRIGGERED,
                     timestamp=event.timestamp + delay,
@@ -429,6 +488,21 @@ class SimulationEngine:
         if event.action in ("hold", "increase_deposit"):
             if agent.state == AgentState.ACTIVE:
                 agent.state = AgentState.HAS_DECIDED
+            # Emit a low-visibility social signal so peers learn some people are staying
+            reasoning_snippet = event.reasoning[:100] if event.reasoning else ""
+            hold_social = SocialSignalEmitted(
+                event_type=EventType.SOCIAL_SIGNAL_EMITTED,
+                timestamp=event.timestamp,
+                source_agent_id=agent.agent_id,
+                source_agent_name=agent.persona.name,
+                source_archetype=agent.persona.archetype,
+                action_event_id=event.event_id,
+                action=event.action,
+                bank_id=event.bank_id,
+                reasoning_snippet=reasoning_snippet,
+                visibility=min(0.4, self._scenario.social_signal_visibility * 0.4),
+            )
+            new_events.append(hold_social)
             return new_events
 
         # Withdrawal
@@ -552,13 +626,17 @@ class SimulationEngine:
 
         # Emit social signal if the withdrawal went through
         if result.amount_paid_out > 0:
+            reasoning_snippet = event.reasoning[:100] if event.reasoning else ""
             social = SocialSignalEmitted(
                 event_type=EventType.SOCIAL_SIGNAL_EMITTED,
                 timestamp=event.timestamp,
                 source_agent_id=agent.agent_id,
+                source_agent_name=agent.persona.name,
+                source_archetype=agent.persona.archetype,
                 action_event_id=event.event_id,
                 action=event.action,
                 bank_id=event.bank_id,
+                reasoning_snippet=reasoning_snippet,
                 visibility=self._scenario.social_signal_visibility,
             )
             new_events.append(social)
@@ -733,7 +811,23 @@ class SimulationEngine:
 
     def _finalize(self, sim_time: float) -> None:
         """Reveal rumor truth, tag agent outcomes, compute unrealized outcomes."""
+        # Build a unified list of (target_bank_id, is_true) from both rumors and signals.
+        # For signals, use the first signal per bank to determine is_true.
+        truth_by_bank: dict[str, bool] = {}
         for rumor in self._scenario.rumors:
+            truth_by_bank[rumor.target_bank_id] = rumor.is_true
+        for signal in self._scenario.signals:
+            if signal.target_bank_id not in truth_by_bank:
+                truth_by_bank[signal.target_bank_id] = signal.is_true
+
+        class _TruthEntry:
+            def __init__(self, bank_id: str, is_true: bool) -> None:
+                self.target_bank_id = bank_id
+                self.is_true = is_true
+
+        unified_rumors = [_TruthEntry(bid, t) for bid, t in truth_by_bank.items()]
+
+        for rumor in unified_rumors if unified_rumors else self._scenario.rumors:
             bank = self._banks.get(rumor.target_bank_id)
             truth = RumorTruthRevealed(
                 event_type=EventType.RUMOR_TRUTH_REVEALED,
@@ -820,10 +914,22 @@ class SimulationEngine:
             getattr(event, "agent_id", "—"),
         )
 
-    def _decision_delay(self) -> float:
-        if self._scenario.speed == ScenarioSpeed.HUMAN_SPEED:
-            return self._scenario.human_speed_decision_delay_seconds
-        return 0.0
+    def _decision_delay(self, agent: Optional[Agent] = None) -> float:
+        if self._scenario.speed == ScenarioSpeed.AI_SPEED:
+            # Small jitter so agents don't all decide at exactly the same timestamp
+            return self._rng.uniform(0.5, 3.0)
+        # Human speed: archetype-calibrated deliberation with anxiety scaling
+        base = getattr(agent.persona, "deliberation_seconds", 20.0) if agent else 20.0
+        anxiety_factor = 1.0
+        if agent and agent.belief_states:
+            max_anxiety = max(
+                (b.anxiety_level for b in agent.belief_states.values()), default=0.0
+            )
+            # Anxious agents decide faster — panic overrides deliberation
+            anxiety_factor = 1.0 - 0.6 * max_anxiety
+        jitter = self._rng.uniform(0.8, 1.3)
+        multiplier = getattr(self._scenario, "human_speed_deliberation_multiplier", 1.0)
+        return max(1.0, base * anxiety_factor * jitter * multiplier)
 
     def _build_peer_summary(self, agent_id: str) -> Optional[str]:
         count = self._social_count.get(agent_id, 0)
@@ -865,9 +971,12 @@ class SimulationEngine:
         held = n - fully - partially
 
         # Withdrawal fraction: fraction of Bank A deposits that left
-        focus_bank_id = (
-            self._scenario.rumors[0].target_bank_id if self._scenario.rumors else None
-        )
+        if self._scenario.rumors:
+            focus_bank_id = self._scenario.rumors[0].target_bank_id
+        elif self._scenario.signals:
+            focus_bank_id = self._scenario.signals[0].target_bank_id
+        else:
+            focus_bank_id = None
         if focus_bank_id and self._initial_deposits.get(focus_bank_id, 0) > 0:
             initial = self._initial_deposits[focus_bank_id]
             current = self._banks[focus_bank_id].total_deposits() if focus_bank_id in self._banks else initial

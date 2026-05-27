@@ -97,7 +97,11 @@ def make_decision(
         trigger_reason=context.trigger_reason,
         action=result.tool_input["action"],
         bank_id=context.bank_id_in_focus,
-        amount_fraction=float(result.tool_input["amount_fraction"]),
+        amount_fraction=(
+            float(result.tool_input["amount_fraction"])
+            if result.tool_input.get("amount_fraction") is not None
+            else None
+        ),
         reasoning=result.tool_input["reasoning"],
         confidence=float(result.tool_input["confidence"]),
         model_used=result.model,

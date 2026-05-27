@@ -19,8 +19,9 @@ import random
 from typing import List
 
 from src.core.agent import Agent
-from src.core.event import AgentObserved, EventType, PolicyAnnounced, RumorPublished, SocialSignalEmitted
+from src.core.event import AgentObserved, EventType, InformationSignalPublished, PolicyAnnounced, RumorPublished, SocialSignalEmitted
 from src.core.scenario import Scenario
+from src.information.environment import InformationSignal
 
 
 # Latency band (lo, hi) as multipliers on the scenario mean latency.
@@ -50,6 +51,10 @@ class Feed:
             if scenario.rumors
             else 5.0
         )
+        # Map signal_id -> InformationSignal for routing look-ups
+        self._signal_map: dict[str, InformationSignal] = {
+            s.signal_id: s for s in scenario.signals
+        }
 
     def route_rumor(self, rumor: RumorPublished) -> List[AgentObserved]:
         """Return AgentObserved events for each agent subscribed to news_feed."""
@@ -126,6 +131,47 @@ class Feed:
                     timestamp=signal.timestamp + latency,
                     agent_id=agent.agent_id,
                     observed_event_id=signal.event_id,
+                    observation_latency=latency,
+                )
+            )
+        return events
+
+    def route_signal(
+        self,
+        pub: InformationSignalPublished,
+    ) -> List[AgentObserved]:
+        """Route an InformationSignal to the agents who can receive it.
+
+        Filtering is two-layered:
+          1. signal.visible_to_archetypes — if non-empty, only those archetypes
+          2. agent.persona.information_access — the agent's source-type filter
+
+        Latency is drawn from the archetype's latency band scaled by the
+        signal's propagation_latency_seconds.
+        """
+        info_signal = self._signal_map.get(pub.signal_id)
+        if info_signal is None:
+            return []
+
+        events: List[AgentObserved] = []
+        for agent in self._agents.values():
+            if "news_feed" not in agent.subscriptions:
+                continue
+            arch = getattr(agent.persona, "archetype", "")
+            access = getattr(agent.persona, "information_access", [])
+            if not info_signal.is_visible_to(arch, access):
+                continue
+            lo, hi = _ARCHETYPE_LATENCY_BAND.get(arch, _DEFAULT_LATENCY_BAND)
+            latency = self._rng.uniform(
+                lo * pub.propagation_latency_seconds,
+                hi * pub.propagation_latency_seconds,
+            )
+            events.append(
+                AgentObserved(
+                    event_type=EventType.AGENT_OBSERVED,
+                    timestamp=pub.timestamp + latency,
+                    agent_id=agent.agent_id,
+                    observed_event_id=pub.event_id,
                     observation_latency=latency,
                 )
             )

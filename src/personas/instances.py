@@ -20,10 +20,12 @@ from src.core.agent import Agent, AgentState, OutcomeLedger
 from src.personas.archetypes import (
     ARCHETYPE_AGGRESSIVE_TRADER,
     ARCHETYPE_CAUTIOUS_RETIREE,
+    ARCHETYPE_CONTRARIAN,
     ARCHETYPE_GIG_WORKER,
     ARCHETYPE_INSTITUTIONAL_TREASURER,
     make_aggressive_trader,
     make_cautious_retiree,
+    make_contrarian,
     make_gig_worker,
     make_institutional_treasurer,
 )
@@ -218,38 +220,6 @@ def make_aisha_obi() -> Agent:
     )
 
 
-def make_carlos_mendez() -> Agent:
-    """Carlos Mendez, 26, software engineer and crypto side-trader.
-
-    $11k at Bank A (fiat cash alongside his crypto holdings). $3k at Bank B.
-    Total $14k in scope. Most impulsive of the aggressive traders.
-    """
-    persona = make_aggressive_trader(
-        name="Crypto Trader",
-        age=26,
-        income_annual=95_000,
-        dependents=0,
-        risk_tolerance_score=0.92,
-        background_narrative=(
-            "Carlos Mendez is a junior software engineer in Austin who "
-            "supplements his income with crypto trading. His Bank A deposit "
-            "is fiat cash he keeps alongside his $22k crypto portfolio. He "
-            "has panic-sold crypto positions during flash crashes and regretted "
-            "it twice. He's also held through crashes and regretted that once. "
-            "He checks financial Crypto Twitter approximately every 20 minutes "
-            "during waking hours. The $11k at Bank A is small enough that he "
-            "would move it fast if he felt anything was wrong — the friction "
-            "is low and his default is to act first and reason later."
-        ),
-    )
-    return _wrap_agent(
-        agent_id="agent_carlos_mendez",
-        persona=persona,
-        portfolio={
-            "bank_a:deposit": 11_000.0,
-            "bank_b:deposit": 3_000.0,
-        },
-    )
 
 
 # ===========================================================================
@@ -467,6 +437,46 @@ def make_robert_achebe() -> Agent:
 
 
 # ===========================================================================
+# Contrarian (1)
+# ===========================================================================
+
+
+def make_elena_vasquez() -> Agent:
+    """Elena Vasquez, 44, independent wealth manager.
+
+    $95k at Bank A (client float + own cash). $130k at Bank B.
+    Total $225k. Deeply diversified, high institutional trust, deliberately
+    contrarian. Has publicly called three bank run panics as false alarms.
+    """
+    persona = make_contrarian(
+        name="Wealth Manager",
+        age=44,
+        income_annual=340_000,
+        dependents=1,
+        background_narrative=(
+            "Elena Vasquez runs an independent wealth management practice in "
+            "Boston, managing about $12M in client assets. She holds $95k at "
+            "Bank A — a mix of her own cash and client float — and has a much "
+            "larger position at Bank B. She has publicly commented on three "
+            "regional bank panics in the past decade, calling all three as false "
+            "alarms; she was right twice and partially wrong once (that bank was "
+            "ultimately acquired, but depositors were made whole). She monitors "
+            "FDIC filings quarterly as a professional habit. She will not move "
+            "based on social signals alone; her evidentiary bar is a verified "
+            "primary-source insolvency signal or a reserve ratio below 12%."
+        ),
+    )
+    return _wrap_agent(
+        agent_id="agent_elena_vasquez",
+        persona=persona,
+        portfolio={
+            "bank_a:deposit": 95_000.0,
+            "bank_b:deposit": 130_000.0,
+        },
+    )
+
+
+# ===========================================================================
 # Convenience accessors
 # ===========================================================================
 
@@ -475,30 +485,32 @@ _CANONICAL_BUILDERS = {
     ARCHETYPE_AGGRESSIVE_TRADER: make_derek_walsh,
     ARCHETYPE_GIG_WORKER: make_priya_nair,
     ARCHETYPE_INSTITUTIONAL_TREASURER: make_james_okonkwo,
+    ARCHETYPE_CONTRARIAN: make_elena_vasquez,
 }
 
 _ALL_BUILDERS = [
-    # Cautious retirees
+    # Cautious retirees (3)
     make_margaret_chen,
     make_robert_petersen,
     make_linda_vo,
-    # Aggressive traders
+    # Aggressive traders (2) — reduced to make room for contrarian
     make_derek_walsh,
     make_aisha_obi,
-    make_carlos_mendez,
-    # Gig workers
+    # Gig workers (3)
     make_priya_nair,
     make_dmitri_petrov,
     make_yolanda_hayes,
-    # Institutional treasurers
+    # Institutional treasurers (3)
     make_james_okonkwo,
     make_sarah_kim,
     make_robert_achebe,
+    # Contrarian (1)
+    make_elena_vasquez,
 ]
 
 
 def make_canonical_agent(archetype: str) -> Agent:
-    """Return one canonical agent for the given archetype (Day-3 vertical slice)."""
+    """Return one canonical agent for the given archetype."""
     if archetype not in _CANONICAL_BUILDERS:
         raise ValueError(
             f"No canonical instance for archetype {archetype!r}. "
@@ -508,7 +520,7 @@ def make_canonical_agent(archetype: str) -> Agent:
 
 
 def make_all_canonical_agents() -> list[Agent]:
-    """Return the four Day-3 canonical agents in archetype order."""
+    """Return canonical agents for all archetypes."""
     return [
         _CANONICAL_BUILDERS[a]()
         for a in (
@@ -516,10 +528,11 @@ def make_all_canonical_agents() -> list[Agent]:
             ARCHETYPE_AGGRESSIVE_TRADER,
             ARCHETYPE_GIG_WORKER,
             ARCHETYPE_INSTITUTIONAL_TREASURER,
+            ARCHETYPE_CONTRARIAN,
         )
     ]
 
 
 def make_all_agents() -> list[Agent]:
-    """Return all 12 agents: 3 per archetype, in archetype order."""
+    """Return all 12 agents: 3+2+3+3+1 distribution."""
     return [builder() for builder in _ALL_BUILDERS]

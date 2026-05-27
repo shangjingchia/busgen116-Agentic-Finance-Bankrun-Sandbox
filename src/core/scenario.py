@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, List, Optional, Tuple
 
+from src.information.environment import InformationSignal
+
 
 class ScenarioSpeed(str, Enum):
     AI_SPEED = "ai"        # no artificial latency between observation and decision
@@ -73,11 +75,17 @@ class Scenario:
     scenario_id: str
     name: str
     description: str
-    rumors: List[RumorConfig]
     banks: List[BankConfig]
     population: List[AgentPopulationGroup]
+    # Primary signal stream — heterogeneous alarm/reassurance signals per archetype
+    signals: List[InformationSignal] = field(default_factory=list)
+    # Legacy shim — old runs and presets can still provide rumors; they are converted
+    # to InformationSignal objects with alarm_level=0.8 in the simulation engine.
+    rumors: List[RumorConfig] = field(default_factory=list)
     speed: ScenarioSpeed = ScenarioSpeed.AI_SPEED
     human_speed_decision_delay_seconds: float = 90.0
+    # Per-archetype deliberation multiplier applied on top of persona.deliberation_seconds
+    human_speed_deliberation_multiplier: float = 1.0
     social_signal_visibility: float = 1.0   # fraction of withdrawals visible on social feed
     seed: int = 42
     max_simulation_time: float = 3600.0     # 1 simulated hour
@@ -89,4 +97,8 @@ class Scenario:
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
         d["speed"] = self.speed.value
+        # InformationSignal is not a plain dict in asdict output; convert manually
+        d["signals"] = [
+            {k: v for k, v in s.__dict__.items()} for s in self.signals
+        ]
         return d
