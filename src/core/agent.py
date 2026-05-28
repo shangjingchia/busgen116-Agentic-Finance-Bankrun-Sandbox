@@ -133,6 +133,7 @@ class OutcomeTag(str, Enum):
     IGNORED_REAL_WARNING = "ignored_real_warning"
     ACTED_APPROPRIATELY = "acted_appropriately"
     PARTIAL_RESPONSE = "partial_response"
+    REVERSED_TO_HOLD = "reversed_to_hold"  # withdrew some then pulled back
 
 
 @dataclass

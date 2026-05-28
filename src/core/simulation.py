@@ -843,12 +843,17 @@ class SimulationEngine:
                     continue
 
                 withdrew_fully = agent.state == AgentState.WITHDRAWN
+                last_action = (
+                    agent.decision_history[-1].action
+                    if agent.decision_history
+                    else "hold"
+                )
+                # Only count as "partially withdrew" if the FINAL decision was a
+                # withdrawal — agents who attempted a withdrawal but reversed to hold
+                # should not be penalised for the reversal.
                 withdrew_partially = (
                     agent.state == AgentState.HAS_DECIDED
-                    and any(
-                        d.action in ("full_withdraw", "partial_withdraw")
-                        for d in agent.decision_history
-                    )
+                    and last_action in ("full_withdraw", "partial_withdraw")
                 )
 
                 if rumor.is_true:
@@ -875,10 +880,10 @@ class SimulationEngine:
                                     )
                                 )
                 else:
+                    total_fees = agent.outcome_ledger.total_realized_cost()
                     if withdrew_fully or withdrew_partially:
                         tag = OutcomeTag.PANICKED_UNNECESSARILY
                         # Record the fees paid as the unnecessary cost
-                        total_fees = agent.outcome_ledger.total_realized_cost()
                         if total_fees > 0:
                             agent.outcome_ledger.unrealized_outcomes.append(
                                 UnrealizedOutcome(
@@ -891,6 +896,22 @@ class SimulationEngine:
                                     ),
                                 )
                             )
+                    elif total_fees > 0:
+                        # Partially withdrew then reversed to hold — paid fees but
+                        # stopped before full exit. Outcome is nuanced: not a full
+                        # panic, but not clean either.
+                        tag = OutcomeTag.REVERSED_TO_HOLD
+                        agent.outcome_ledger.unrealized_outcomes.append(
+                            UnrealizedOutcome(
+                                timestamp=sim_time,
+                                decision_event_id="finalization",
+                                outcome_type="would_have_gained",
+                                amount=total_fees,
+                                description=(
+                                    f"Paid ${total_fees:,.2f} in fees before reversing to hold."
+                                ),
+                            )
+                        )
                     else:
                         tag = OutcomeTag.ACTED_APPROPRIATELY
 
