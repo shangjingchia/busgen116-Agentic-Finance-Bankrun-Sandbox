@@ -146,7 +146,7 @@ Point at the headline count strip (fully withdrew / partial / kept money in / go
 
 **Play the screen recording.** Narrate over it (keep it moving — don't read every control):
 
-> "You describe an agent in plain English and the system writes its full persona. You set the bank's health, the population mix — make it all retirees, or all institutional treasurers — choose the rumor and its wording, even drop in a counter-signal that tries to talk the agents back. Name it, run it, and it's saved to come back to.
+> "You describe an agent in plain English and the system writes its full persona. You set the bank's health and payout speed, the population mix — make it all retirees, or all institutional treasurers — choose the rumor and its wording, and optionally add a regulator or a counter-signal that tries to talk the agents back. Name it, run it, and it's saved to come back to.
 >
 > *(As the result lands)* Same engine, totally different scenario. And this is really **infrastructure**, not a demo: a regulator can stress-test its delegation rules before approving them, a fintech can test its agent before launch — and as you feed in real data on who delegates to which model, you can size the systemic risk we found here. That's also the path to where this is going: eventually you just *type* the crisis — 'a stablecoin de-pegs Friday at 9pm' — and the sandbox builds it for you.
 >

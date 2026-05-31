@@ -117,7 +117,7 @@
 
 **Play the recording.** Narrate lightly — don't read every control:
 
-> "You describe an agent in plain English, set the bank's health and the population mix, write the rumor, even add a counter-signal. Name it, run it, reload it.
+> "You describe an agent in plain English, set the bank's health and payout speed, choose the population mix, write the rumor, and optionally drop in a regulator or a counter-signal that talks the agents back. Name it, run it, reload it.
 >
 > *(As the result lands)* Same engine, different scenario. And this is really **infrastructure**: a regulator can stress-test its delegation rules before approving them, a fintech can test its agent before launch — and as you feed in real data on who delegates to which model, you can size the systemic risk we found here. Eventually you just *type* the crisis and the sandbox builds it. Twelve agents is the start — this is how anyone probes the next one. **Thank you — happy to dig into any of it.**"
 

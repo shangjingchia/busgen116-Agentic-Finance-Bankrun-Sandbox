@@ -14,6 +14,7 @@ from pathlib import Path
 
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
 from pptx.util import Inches, Pt
 
@@ -214,22 +215,28 @@ s = add_slide(DEMO_BG)
 kicker(s, "Play recording · the Sandbox")
 tf = _box(s, 0.9, 1.2, 11.5, 1.1)
 _para(tf, [("It isn't a fixed demo — ", INK), ("build any crisis", RED)], 34, bold=True, first=True)
-tf2 = _box(s, 0.9, 2.25, 11.5, 2.45)
-bullets(tf2, [
-    "🗣  Describe agents in plain English",
-    "🏦  Set bank health & payout speed",
-    "👥  Choose the population mix",
-    "📰  Write the rumor & its wording",
-    "🟢  Add a reassuring counter-signal     🏛  Drop in a regulator",
-    "💾  Name it · save it · reload it",
-], size=18, color=BODY, space_after=4)
-tf3 = _box(s, 0.9, 5.0, 11.5, 1.9)
+# Video placeholder — replace the capability bullets (now spoken in the script) with a
+# 16:9 target you drop the Sandbox recording onto in PowerPoint, then delete this box.
+_VW, _VH = 6.0, 3.375  # 16:9
+ph = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                        Inches((13.333 - _VW) / 2), Inches(2.0), Inches(_VW), Inches(_VH))
+ph.fill.solid()
+ph.fill.fore_color.rgb = RGBColor(0x17, 0x11, 0x1E)
+ph.line.color.rgb = TEAL
+ph.line.width = Pt(1.25)
+ph.shadow.inherit = False
+phtf = ph.text_frame
+phtf.word_wrap = True
+phtf.vertical_anchor = MSO_ANCHOR.MIDDLE
+_para(phtf, [("▶  Sandbox screen recording", MUTED)], 20, bold=True,
+      align=PP_ALIGN.CENTER, first=True, space_after=4)
+_para(phtf, [("insert video here · Playback ▸ Play Full Screen · then delete this box", DIM)], 12,
+      align=PP_ALIGN.CENTER)
+tf3 = _box(s, 0.9, 5.6, 11.5, 1.2)
 _para(tf3, [("It's not just a demo — it's ", INK), ("infrastructure", TEAL),
             (": a regulator stress-tests delegation rules before approving them, a fintech vets "
              "its agent before launch, and real data on who delegates to which model sizes the "
-             "systemic risk.", INK)], 18, first=True, line=1.22, space_after=8)
-_para(tf3, [("Next: just ", BODY), ("type", TEAL), (" the scenario — “a stablecoin de-pegs "
-            "Friday at 9pm” — and the sandbox builds it.", BODY)], 17, line=1.22)
+             "systemic risk.", INK)], 17, first=True, line=1.22)
 footer(s, "Thank you — questions?", 8)
 
 # =============================================================================
@@ -470,9 +477,10 @@ NOTES = {
 "[5:30 · SANDBOX + CLOSE]\n"
 "\"We didn't hard-code these scenarios. It all runs on a sandbox where you build any "
 "run. Here's a short recording.\"\n"
-"[PLAY THE RECORDING — narrate lightly, don't read every control]\n"
-"\"You describe an agent in plain English, set the bank's health and the population mix, "
-"write the rumor, even add a counter-signal. Name it, run it, reload it.\n"
+"[PLAY THE RECORDING — narrate lightly over the controls as they appear]\n"
+"\"You describe an agent in plain English, set the bank's health and payout speed, choose "
+"the population mix, write the rumor, and optionally drop in a regulator or a counter-signal "
+"that talks the agents back. Name it, run it, reload it.\n"
 "(As the result lands) Same engine, different scenario. And this is really "
 "infrastructure: a regulator can stress-test its delegation rules before approving them, "
 "a fintech can test its agent before launch — and as you feed in real data on who "
