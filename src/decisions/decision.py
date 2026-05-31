@@ -19,7 +19,6 @@ from typing import List, Optional
 
 from src.core.agent import Agent, DecisionRecord
 from src.decisions.llm_client import (
-    DECISION_TOOL_SCHEMA,
     DEFAULT_HAIKU_MODEL,
     DEFAULT_SONNET_MODEL,
     LLMCallResult,
@@ -44,6 +43,7 @@ class DecisionContext:
     trigger_reason: str = "rumor_observed"
     peer_action_summary: Optional[str] = None
     prior_decision_summary: Optional[str] = None
+    payment_context: Optional[str] = None
 
 
 def make_decision(
@@ -65,6 +65,7 @@ def make_decision(
         peer_action_summary=context.peer_action_summary,
         prior_decision_summary=context.prior_decision_summary,
         sim_time_seconds=context.sim_time_seconds,
+        payment_context=context.payment_context,
     )
 
     # Model routing
@@ -88,6 +89,11 @@ def make_decision(
         system_prompt=system_prompt,
         user_message=user_message,
         model=model,
+        # Reasoning models (e.g. Gemini 3.x Flash) spend completion tokens on internal
+        # thinking before emitting the tool call; a 1024 cap truncates them mid-thought
+        # (finish_reason='length') and forces a hold-fallback. Non-reasoning models stop
+        # at the tool call and never touch the extra budget, so this is cost-neutral for them.
+        max_tokens=3000,
     )
 
     record = DecisionRecord(

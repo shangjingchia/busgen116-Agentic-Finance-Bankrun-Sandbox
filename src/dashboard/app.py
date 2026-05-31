@@ -4,10 +4,11 @@ Streamlit dashboard entry point for the AI Bank Run Sandbox.
 Launch with:
     streamlit run src/dashboard/app.py
 
-Three views:
-  Presets    — pick a scenario, tweak parameters, run the simulation.
-  Live View  — scrub through the pre-rendered run: graph + event timeline.
-  Inspect    — click any agent, read their LLM reasoning.
+Views:
+  Presets   — pick a scenario, tweak parameters, run the simulation.
+  Inspect   — click any agent, read their full LLM reasoning and outcome.
+  Findings  — the cross-scenario results, incl. the payment-contagion story.
+  Sandbox   — build custom personas and run your own scenario.
 """
 
 import sys
@@ -21,6 +22,93 @@ st.set_page_config(
     page_icon="🏦",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# ── Global CSS polish ────────────────────────────────────────────────────────
+st.markdown(
+    """
+<style>
+/* Hide Streamlit toolbar so it doesn't clip top content */
+header[data-testid="stHeader"] { display: none !important; }
+#MainMenu { visibility: hidden !important; }
+
+/* Tighten default top padding (no toolbar to clear) */
+.block-container { padding-top: 0.75rem !important; padding-bottom: 1rem !important; }
+
+/* Stronger headers */
+h1 { font-weight: 800 !important; letter-spacing: -0.02em !important; }
+h2 { font-weight: 800 !important; letter-spacing: -0.01em !important; color: #1A1A2E !important; }
+h3 { font-weight: 700 !important; }
+
+/* Metric cards in sidebar */
+[data-testid="stMetricValue"]  { font-weight: 800 !important; }
+[data-testid="stMetricLabel"]  { font-weight: 600 !important; font-size: 0.82rem !important; color: #555 !important; }
+
+/* Primary buttons — red glow */
+.stButton > button[kind="primary"] {
+    box-shadow: 0 3px 12px rgba(225,87,89,0.30) !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.02em !important;
+}
+.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 5px 18px rgba(225,87,89,0.45) !important;
+    transform: translateY(-1px);
+}
+
+/* Dividers */
+hr { border-top: 1px solid #EAEAEA !important; margin: 1.3rem 0 !important; }
+
+/* Tabs bold */
+button[data-baseweb="tab"] { font-weight: 600 !important; }
+
+/* Sidebar */
+[data-testid="stSidebar"] { border-right: 1px solid #EAEAEA; }
+
+/* Go-to-top button */
+#go-top-btn {
+    position: fixed;
+    bottom: 2rem;
+    right: 1.5rem;
+    z-index: 9999;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: #1A1A2E;
+    color: white;
+    font-size: 1.1rem;
+    border: none;
+    cursor: pointer;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.28);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    transition: background 0.15s, transform 0.15s;
+}
+#go-top-btn:hover {
+    background: #E15759;
+    color: white;
+    transform: translateY(-2px);
+}
+
+/* Cascade-suspended pulsing glow — triggered by class on the banner div */
+@keyframes suspend-pulse {
+    0%,100% { box-shadow: 0 0  0  0 rgba(225,87,89,0.00); }
+    50%      { box-shadow: 0 0 28px 8px rgba(225,87,89,0.18); }
+}
+.cascade-suspended { animation: suspend-pulse 1.8s ease-in-out infinite; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# Top anchor + floating "back to top" link. Streamlit strips inline JS event
+# handlers (onclick) from injected HTML, so a <button onclick> never fires —
+# an anchor to a top-of-page <div id> works (same mechanism as the Findings nav).
+st.markdown(
+    '<div id="app-top" style="position:relative;scroll-margin-top:0"></div>'
+    '<a href="#app-top" id="go-top-btn" title="Back to top">↑</a>',
+    unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------------------------
@@ -47,7 +135,7 @@ with st.sidebar:
     st.caption("Studying AI agent behavior under financial stress")
     st.divider()
 
-    _pages = ["Presets", "Live View", "Inspect", "Findings", "Sandbox"]
+    _pages = ["Presets", "Inspect", "Findings", "Sandbox"]
     # Drain any programmatic nav request BEFORE the widget renders
     # (writing to a widget-bound key after instantiation raises StreamlitAPIException)
     _pending = st.session_state.pop("_pending_nav", None)
@@ -65,36 +153,10 @@ with st.sidebar:
     st.divider()
 
     if st.session_state.run_result:
-        m = st.session_state.run_result.get("metrics", {})
-        n = m.get("total_agents", 0)
-        pct = m.get("final_withdrawal_fraction", 0.0)
-        cascade = m.get("cascade_triggered", False)
-        t50 = m.get("time_to_50pct_deposits_paid") or m.get("time_to_50pct_withdrawn")
-
-        # Count by decision intent from agent_final_states
-        agents = st.session_state.run_result.get("agent_final_states", [])
-        n_ran = m.get("attempted_exit_count")
-        if n_ran is None:
-            n_ran = sum(
-                1 for a in agents
-                if a.get("decision_history") and
-                a["decision_history"][-1].get("action") in ("full_withdraw", "partial_withdraw")
-            )
-        # Count agents who actually received any money
-        all_events = st.session_state.run_result.get("events", [])
-        n_paid_out = m.get("paid_out_count")
-        if n_paid_out is None:
-            n_paid_out = len({
-                e["agent_id"] for e in all_events
-                if e.get("event_type") == "withdrawal_processed" and e.get("amount_paid_out", 0) > 0
-            })
-        st.caption(f"**Last run:** {st.session_state.run_result.get('scenario_name', '—')}")
-        st.metric("Tried to exit", f"{n_ran} / {n}")
-        st.metric("Got cash out", f"{n_paid_out} / {n}")
-        st.metric("Bank A paid out", f"{pct:.1%}")
-        st.metric("Cascade", "🔥 YES" if cascade else "✓ no")
-        if t50 is not None:
-            st.metric("Time to 50%", f"{t50:.0f}s")
+        st.caption(
+            f"**Loaded:** {st.session_state.run_result.get('scenario_name', '—')}  \n"
+            f"Run summary and per-agent reasoning are on the **Inspect** page."
+        )
     else:
         st.caption("No run yet — go to Presets.")
 
@@ -105,10 +167,6 @@ with st.sidebar:
 if page == "Presets":
     from src.dashboard.scenario_panel import render_configure
     render_configure()
-
-elif page == "Live View":
-    from src.dashboard.live_view import render_live_view
-    render_live_view()
 
 elif page == "Inspect":
     from src.dashboard.reasoning_view import render_inspect

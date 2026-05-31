@@ -122,6 +122,7 @@ def render_decision_user_message(
     peer_action_summary: str | None = None,
     prior_decision_summary: str | None = None,
     sim_time_seconds: float = 0.0,
+    payment_context: str | None = None,
 ) -> str:
     """Render the user-message side of a decision call.
 
@@ -149,6 +150,13 @@ def render_decision_user_message(
     if agent.belief_states and (belief := agent.belief_states.get(bank_id_in_focus)):
         sections.append(
             f"## Your current read on the situation\n\n{belief.render_for_prompt()}"
+        )
+
+    if payment_context:
+        sections.append(
+            f"## Your payment situation\n\n{payment_context}\n\n"
+            f"Cash is only useful if you can actually access it — a deposit you "
+            f"cannot withdraw will not pay your bills."
         )
 
     if peer_action_summary:

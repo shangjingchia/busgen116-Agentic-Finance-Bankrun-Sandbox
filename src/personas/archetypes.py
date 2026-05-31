@@ -18,7 +18,6 @@ because their rendered prompts are different.
 
 from __future__ import annotations
 
-from typing import List, Optional
 
 from src.core.agent import CostCategory, CostItem, Persona, Severity
 from src.information.environment import (
@@ -35,14 +34,12 @@ ARCHETYPE_CAUTIOUS_RETIREE = "cautious_retiree"
 ARCHETYPE_AGGRESSIVE_TRADER = "aggressive_trader"
 ARCHETYPE_GIG_WORKER = "gig_worker"
 ARCHETYPE_INSTITUTIONAL_TREASURER = "institutional_treasurer"
-ARCHETYPE_CONTRARIAN = "contrarian"
 
 ALL_ARCHETYPES = (
     ARCHETYPE_CAUTIOUS_RETIREE,
     ARCHETYPE_AGGRESSIVE_TRADER,
     ARCHETYPE_GIG_WORKER,
     ARCHETYPE_INSTITUTIONAL_TREASURER,
-    ARCHETYPE_CONTRARIAN,
 )
 
 
@@ -540,9 +537,8 @@ def institutional_treasurer_cost_function() -> list[CostItem]:
             severity=Severity.MODERATE,
             narrative=(
                 "Fees on operating accounts are meaningful but you are authorized "
-                "to absorb them as a risk-management expense — typically up to "
-                "around 1% of the account balance — without further approval. "
-                "Fees are not a primary input into the decision."
+                "to absorb them as a routine risk-management expense without "
+                "further approval. Fees are not a primary input into the decision."
             ),
         ),
         CostItem(
@@ -632,151 +628,6 @@ def make_institutional_treasurer(
 
 
 # ===========================================================================
-# Contrarian
-# ===========================================================================
-#
-# Profile: wealthy, diversified, and genuinely unafraid of this deposit. Has
-# very high institutional trust and a documented habit of staying put (or
-# even adding) while others panic. The anti-gig-worker. When 80%+ of peers
-# run, they will reconsider — but below that threshold, social proof pushes
-# them in the opposite direction (if everyone's panicking, the real
-# opportunity is probably staying).
-
-
-def contrarian_cost_function() -> list[CostItem]:
-    return [
-        CostItem(
-            category=CostCategory.MISSED_UPSIDE,
-            severity=Severity.SIGNIFICANT,
-            narrative=(
-                "Your portfolio is diversified enough that this deposit is a small "
-                "slice. When others panic-sell, assets get cheap. The opportunity "
-                "cost of sitting on the sideline during a recovery is the real risk, "
-                "not this deposit's principal. You've seen more than one 'bank run' "
-                "turn into a non-event, and the people who held made out well."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.PRINCIPAL_LOSS,
-            severity=Severity.MODERATE,
-            narrative=(
-                "You have enough diversified wealth that a total loss on this deposit "
-                "would be painful but survivable. You manage risk at the portfolio "
-                "level, not the account level. FDIC covers the first $250k anyway."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.ACTION_INACTION_ASYMMETRY,
-            severity=Severity.MODERATE,
-            narrative=(
-                "When you look at bank runs historically, acting on panic causes "
-                "more losses than the runs themselves for the people who run. You "
-                "hold until you see verified primary-source evidence of insolvency, "
-                "not crowd behavior. Social panic is a reason to be curious, not to "
-                "act."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.WITHDRAWAL_FEES,
-            severity=Severity.MINOR,
-            narrative=(
-                "Fees are transaction costs — they always factor against acting. "
-                "You need a strong positive reason to act, not just absence of a "
-                "negative reason to stay."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.CASH_FLOW_DISRUPTION,
-            severity=Severity.MINOR,
-            narrative=(
-                "You have multiple accounts, a line of credit, and liquid reserves "
-                "elsewhere. Cash flow disruption from one bank is inconvenient, "
-                "not consequential."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.LOCKED_IN_LOSS,
-            severity=Severity.MINOR,
-            narrative=(
-                "You don't crystallize losses unnecessarily. Staying put and "
-                "riding out a false alarm costs nothing; breaking out costs fees "
-                "and potentially higher reinvestment costs."
-            ),
-        ),
-        CostItem(
-            category=CostCategory.REPUTATIONAL_DAMAGE,
-            severity=Severity.IRRELEVANT,
-            narrative=(
-                "You don't make financial decisions based on what others think of "
-                "your moves. Your track record speaks for itself."
-            ),
-        ),
-    ]
-
-
-def make_contrarian(
-    *,
-    name: str,
-    age: int,
-    income_annual: float,
-    dependents: int,
-    background_narrative: str,
-    risk_tolerance_score: float = 0.70,
-    financial_sophistication_score: float = 0.85,
-) -> Persona:
-    return Persona(
-        archetype=ARCHETYPE_CONTRARIAN,
-        name=name,
-        age=age,
-        income_annual=income_annual,
-        dependents=dependents,
-        risk_tolerance_score=risk_tolerance_score,
-        risk_tolerance_prose=(
-            "Deliberately contrarian on crowd signals. You've made money before "
-            "by staying when everyone ran, and you know the cognitive bias of "
-            "herding. You are not fearless — you have a high evidentiary bar "
-            "for acting, and crowd behavior does not meet it."
-        ),
-        financial_sophistication_score=financial_sophistication_score,
-        financial_sophistication_prose=(
-            "You follow financial news and terminal data. You understand liquidity "
-            "risk, bank balance sheets, and FDIC insurance limits well. You read "
-            "primary-source filings and have enough wealth to be comfortable "
-            "sitting out a false alarm."
-        ),
-        goals=[
-            "Preserve and grow a diversified portfolio over a 15-year horizon",
-            "Exploit market dislocations caused by irrational herding behavior",
-            "Never crystallize a loss based on crowd panic alone",
-            "Maintain FDIC coverage but not let coverage limits drive timing",
-        ],
-        trust_profile=(
-            "Skeptical of social signals by design. You track them as sentiment "
-            "data, not action triggers. You trust verified analyst commentary, "
-            "FDIC data, and your own assessment of bank fundamentals. You need "
-            "to see actual primary-source insolvency evidence before acting. "
-            "When you see widespread panic, your first instinct is to ask what "
-            "the rational actors are doing, not to follow the crowd."
-        ),
-        voice_examples=[
-            "Everyone's running. That's the moment you think, not react.",
-            "Show me the actual balance sheet, not the Twitter thread.",
-            "I've been through three of these. The ones who held came out ahead every time.",
-        ],
-        cost_function=contrarian_cost_function(),
-        background_narrative=background_narrative,
-        peer_action_reconsideration_threshold=0.80,
-        institution_trust_prior=0.85,
-        deliberation_seconds=12.0,
-        information_access=[
-            SOURCE_SOCIAL_MEDIA,
-            SOURCE_FINANCIAL_NEWS,
-            SOURCE_INTERNAL_ANALYSIS,
-        ],
-    )
-
-
-# ===========================================================================
 # Convenience: build any archetype by name
 # ===========================================================================
 
@@ -786,7 +637,6 @@ _ARCHETYPE_BUILDERS = {
     ARCHETYPE_AGGRESSIVE_TRADER: make_aggressive_trader,
     ARCHETYPE_GIG_WORKER: make_gig_worker,
     ARCHETYPE_INSTITUTIONAL_TREASURER: make_institutional_treasurer,
-    ARCHETYPE_CONTRARIAN: make_contrarian,
 }
 
 
@@ -804,7 +654,6 @@ _ARCHETYPE_COST_FUNCTIONS = {
     ARCHETYPE_AGGRESSIVE_TRADER: aggressive_trader_cost_function,
     ARCHETYPE_GIG_WORKER: gig_worker_cost_function,
     ARCHETYPE_INSTITUTIONAL_TREASURER: institutional_treasurer_cost_function,
-    ARCHETYPE_CONTRARIAN: contrarian_cost_function,
 }
 
 

@@ -1,11 +1,10 @@
 """
-Batch experiment runner for additional simulation runs.
+Batch experiment runner.
 
-Experiments (in priority order):
-  1. Latency sweep        — 7 runs: rumor_high_false at 0s,10s,20s,30s,45s,60s,90s delay
-  2. Persona extremes     — 4 runs: all-retiree and all-treasurer populations, AI+human speed
-  3. Model isolation      — 2 runs: force all agents to Haiku (patch routing threshold)
-  4. Low-cred extension   — 3 runs: credibility at 5%, 10%, 15% (extend existing sweep)
+Experiments:
+  1. Latency sweep  — 5 runs: rumor_high_false at AI speed, 0.5×, 1.0×, 2.0×, 4.0×
+                      human_speed_deliberation_multiplier. Uses new signal-based
+                      architecture; per-archetype deliberation replaces flat delays.
 """
 
 from __future__ import annotations
@@ -16,7 +15,6 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure project root is on the path when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
@@ -25,179 +23,117 @@ try:
 except ImportError:
     pass
 
-from src.core.scenario import (
-    AgentPopulationGroup,
-    BankConfig,
-    RumorConfig,
-    Scenario,
-    ScenarioSpeed,
-)
+from src.core.scenario import Scenario, ScenarioSpeed
 from src.core.simulation import run_scenario
 from src.decisions.llm_client import LLMClient
-from src.personas.instances import (
-    make_margaret_chen,
-    make_robert_petersen,
-    make_linda_vo,
-    make_james_okonkwo,
-    make_sarah_kim,
-    make_robert_achebe,
-    make_all_agents,
+from src.personas.instances import make_all_agents
+from src.scenarios.presets import (
+    _BANKS,
+    _POPULATION,
+    _signals_high_false,
+    _signals_language_soft,
+    _signals_language_neutral,
+    _signals_language_charged,
 )
-from src.scenarios.presets import _BANKS, _POPULATION, _RUMOR_HIGH
-import src.decisions.strategies as strategies
 
 RUNS_DIR = Path(__file__).parent.parent / "runs"
 
 
 # ---------------------------------------------------------------------------
-# Shared rumor config (high-credibility, false alarm)
+# Latency sweep
+#
+# Sweeps human_speed_deliberation_multiplier across 5 points.
+# At multiplier=1.0 the per-archetype base times are:
+#   aggressive_trader  ~4s  (+ 0.8-1.3 jitter, - anxiety scaling)
+#   gig_worker         ~8s
+#   cautious_retiree   ~25s
+#   institutional_treasurer ~55s
+#
+# Counter-signals arrive at T=11s (bank denial) and T=17s (FDIC).
+# At 2.0× traders decide ~T=11 — right as the denial lands.
+# At 4.0× most agents see both counter-signals before deciding.
 # ---------------------------------------------------------------------------
 
-def _high_false_rumor(credibility: float = 0.85) -> RumorConfig:
-    return RumorConfig(
-        content=_RUMOR_HIGH,
-        source="market_terminal_alert",
-        credibility=credibility,
-        target_bank_id="bank_a",
-        publish_at_time=0.0,
-        is_true=False,
-        propagation_latency_seconds=3.0,
-    )
+SWEEP_POINTS = [
+    # (label_suffix, speed,               multiplier)
+    ("000_ai",  ScenarioSpeed.AI_SPEED,    1.0),   # AI speed: 0.5-3s jitter
+    ("050_hum", ScenarioSpeed.HUMAN_SPEED, 0.5),   # compressed human
+    ("100_hum", ScenarioSpeed.HUMAN_SPEED, 1.0),   # natural human
+    ("200_hum", ScenarioSpeed.HUMAN_SPEED, 2.0),   # slow — counter-signals start landing
+    ("400_hum", ScenarioSpeed.HUMAN_SPEED, 4.0),   # very slow — full signal picture
+]
 
 
-# ===========================================================================
-# Experiment 1: Latency sweep
-# 7 runs: 0s (AI_SPEED), 10s, 20s, 30s, 45s, 60s, 90s (HUMAN_SPEED)
-# Isolates the cascade threshold as a function of deliberation delay alone.
-# ===========================================================================
-
-LATENCY_DELAYS = [0, 10, 20, 30, 45, 60, 90]
-
-
-def make_latency_sweep_scenario(delay_seconds: int) -> Scenario:
-    if delay_seconds == 0:
-        speed = ScenarioSpeed.AI_SPEED
-        sid = "sweep_latency_000s"
-    else:
-        speed = ScenarioSpeed.HUMAN_SPEED
-        sid = f"sweep_latency_{delay_seconds:03d}s"
-
+def make_latency_sweep_scenario(label: str, speed: ScenarioSpeed, multiplier: float) -> Scenario:
     return Scenario(
-        scenario_id=sid,
-        name=f"Latency Sweep — {delay_seconds}s Decision Delay",
+        scenario_id=f"sweep_latency_{label}",
+        name=f"Latency Sweep — {label.replace('_', ' ')}",
         description=(
-            f"High-credibility false rumor, {delay_seconds}s per-agent decision delay. "
-            "Part of latency sweep (0-90s) to find cascade threshold."
+            f"High-credibility false rumor. Speed={speed.value}, "
+            f"deliberation_multiplier={multiplier}×. "
+            "Part of latency sweep to characterise cascade vs deliberation speed."
         ),
-        rumors=[_high_false_rumor()],
+        signals=_signals_high_false(is_true=False),
         banks=_BANKS,
         population=_POPULATION,
         speed=speed,
-        human_speed_decision_delay_seconds=float(delay_seconds),
+        human_speed_deliberation_multiplier=multiplier,
         social_signal_visibility=1.0,
         seed=42,
         max_simulation_time=3600.0,
     )
 
 
-# ===========================================================================
-# Experiment 2: Persona extremes
-# 4 runs: all-retiree and all-treasurer, AI and human speed.
-# Tests whether cascade dynamics are archetype-universal or driven by the mix.
-# ===========================================================================
+async def run_latency_sweep(client: LLMClient) -> None:
+    sep = "=" * 68
+    total = len(SWEEP_POINTS)
+    print(f"\n{sep}")
+    print(f"  LATENCY SWEEP  —  {total} runs")
+    print(f"  Signal stream: high-credibility false alarm")
+    print(f"  Multipliers: AI, 0.5×, 1.0×, 2.0×, 4.0×")
+    print(sep)
 
-def _clone_agents(base_builders, n: int, id_prefix: str):
-    """Deepcopy n*len(base_builders) agents with unique IDs."""
-    agents = []
-    for i in range(n):
-        for fn in base_builders:
-            a = copy.deepcopy(fn())
-            a.agent_id = f"{id_prefix}_{a.agent_id}_{i}"
-            agents.append(a)
-    return agents
+    for i, (label, speed, multiplier) in enumerate(SWEEP_POINTS, 1):
+        scenario = make_latency_sweep_scenario(label, speed, multiplier)
+        agents = make_all_agents()
+        print(f"\n[{i}/{total}] {scenario.scenario_id}", flush=True)
+        await run_scenario(scenario, agents, llm_client=client, runs_dir=RUNS_DIR, verbose=True)
 
-
-def make_all_retirees():
-    return _clone_agents(
-        [make_margaret_chen, make_robert_petersen, make_linda_vo],
-        n=4,
-        id_prefix="xp",
-    )
+    print(f"\n{sep}")
+    print("  LATENCY SWEEP COMPLETE")
+    print(sep)
+    print(client.format_cost_summary())
 
 
-def make_all_treasurers():
-    return _clone_agents(
-        [make_james_okonkwo, make_sarah_kim, make_robert_achebe],
-        n=4,
-        id_prefix="xp",
-    )
+# ---------------------------------------------------------------------------
+# Language sweep
+#
+# Three runs with IDENTICAL credibility (0.50) and alarm (0.45) numbers.
+# Only the signal wording changes: soft → neutral → charged.
+# Bank is solvent in all three runs (is_true=False).
+#
+# Hypothesis: if withdrawal fraction or speed differs across these three,
+# agents are reacting to semantic surface rather than the stated credibility.
+# ---------------------------------------------------------------------------
+
+LANGUAGE_SWEEP_POINTS = [
+    # (scenario_id,   display_label,      signal_fn)
+    ("lang_soft",    "Soft language",     _signals_language_soft),
+    ("lang_neutral", "Neutral language",  _signals_language_neutral),
+    ("lang_charged", "Charged language",  _signals_language_charged),
+]
 
 
-def make_persona_extreme_scenario(archetype: str, speed: ScenarioSpeed, delay: float) -> Scenario:
-    speed_label = speed.value
+def make_language_sweep_scenario(scenario_id: str, label: str, signal_fn) -> Scenario:
     return Scenario(
-        scenario_id=f"persona_all_{archetype}_{speed_label}",
-        name=f"Persona Extreme — All {archetype.replace('_', ' ').title()} ({speed_label})",
+        scenario_id=scenario_id,
+        name=f"Language Sweep — {label}",
         description=(
-            f"12 agents, all {archetype} archetype. High-credibility false rumor. "
-            "Tests whether cascade requires mixed population or any single archetype sustains it."
+            f"Credibility fixed at 0.50, alarm at 0.45 for all language-sweep runs. "
+            f"Wording: {label.lower()}. Bank is solvent. "
+            "Part of language-sensitivity experiment."
         ),
-        rumors=[_high_false_rumor()],
-        banks=_BANKS,
-        population=_POPULATION,
-        speed=speed,
-        human_speed_decision_delay_seconds=delay,
-        social_signal_visibility=1.0,
-        seed=42,
-        max_simulation_time=3600.0,
-    )
-
-
-# ===========================================================================
-# Experiment 3: Model capability isolation
-# 2 runs: full mixed population, all Haiku (patch routing threshold to ∞).
-# Tests whether institutional first-mover advantage is model capability or persona.
-# ===========================================================================
-
-def make_model_isolation_scenario(speed: ScenarioSpeed, delay: float) -> Scenario:
-    return Scenario(
-        scenario_id=f"model_isolation_all_haiku_{speed.value}",
-        name=f"Model Isolation — All Haiku ({speed.value} speed)",
-        description=(
-            "Same as rumor_high_false but LARGE_PORTFOLIO_USD patched to ∞ "
-            "so all agents use Haiku. Tests if institutional exit-order advantage "
-            "is model-capability-driven or persona-driven."
-        ),
-        rumors=[_high_false_rumor()],
-        banks=_BANKS,
-        population=_POPULATION,
-        speed=speed,
-        human_speed_decision_delay_seconds=delay,
-        social_signal_visibility=1.0,
-        seed=42,
-        max_simulation_time=3600.0,
-    )
-
-
-# ===========================================================================
-# Experiment 4: Low-credibility extension
-# 3 runs: 5%, 10%, 15% credibility at AI speed (extends existing 25-85% sweep).
-# Completes the lower tail — at what label does the cascade finally break down?
-# ===========================================================================
-
-LOW_CRED_LEVELS = [0.05, 0.10, 0.15]
-
-
-def make_low_cred_scenario(credibility: float) -> Scenario:
-    pct = int(credibility * 100)
-    return Scenario(
-        scenario_id=f"sweep_false_{pct:03d}_ai",
-        name=f"Low-Credibility Extension — {pct}% (AI speed)",
-        description=(
-            f"Same alarming rumor content as rumor_high_false, labeled {pct}% credible. "
-            "Extends credibility sweep into the very low range."
-        ),
-        rumors=[_high_false_rumor(credibility=credibility)],
+        signals=signal_fn(is_true=False),
         banks=_BANKS,
         population=_POPULATION,
         speed=ScenarioSpeed.AI_SPEED,
@@ -207,76 +143,50 @@ def make_low_cred_scenario(credibility: float) -> Scenario:
     )
 
 
-# ===========================================================================
-# Runner
-# ===========================================================================
-
-async def run_all() -> None:
-    client = LLMClient()
+async def run_language_sweep(client: LLMClient) -> None:
     sep = "=" * 68
-
+    total = len(LANGUAGE_SWEEP_POINTS)
     print(f"\n{sep}")
-    print("  BATCH EXPERIMENT RUNNER  —  16 runs total")
+    print(f"  LANGUAGE SWEEP  —  {total} runs")
+    print(f"  Credibility: 0.50 (locked) · Alarm: 0.45 (locked)")
+    print(f"  Variable: signal wording only (soft / neutral / charged)")
+    print(f"  Bank: solvent in all three")
     print(sep)
 
-    completed = 0
-    total = 16
-
-    # ── 1. Latency sweep ────────────────────────────────────────────────────
-    print(f"\n[Experiment 1/4] LATENCY SWEEP  (7 runs)")
-    for delay in LATENCY_DELAYS:
-        scenario = make_latency_sweep_scenario(delay)
+    for i, (sid, label, signal_fn) in enumerate(LANGUAGE_SWEEP_POINTS, 1):
+        scenario = make_language_sweep_scenario(sid, label, signal_fn)
         agents = make_all_agents()
-        print(f"  [{completed+1}/{total}] {scenario.scenario_id} ...", flush=True)
+        print(f"\n[{i}/{total}] {sid}  ({label})", flush=True)
         await run_scenario(scenario, agents, llm_client=client, runs_dir=RUNS_DIR, verbose=True)
-        completed += 1
-
-    # ── 2. Persona extremes ─────────────────────────────────────────────────
-    print(f"\n[Experiment 2/4] PERSONA EXTREMES  (4 runs)")
-    persona_configs = [
-        ("cautious_retiree",        make_all_retirees,   ScenarioSpeed.AI_SPEED,    0.0),
-        ("cautious_retiree",        make_all_retirees,   ScenarioSpeed.HUMAN_SPEED, 90.0),
-        ("institutional_treasurer", make_all_treasurers, ScenarioSpeed.AI_SPEED,    0.0),
-        ("institutional_treasurer", make_all_treasurers, ScenarioSpeed.HUMAN_SPEED, 90.0),
-    ]
-    for archetype, make_fn, speed, delay in persona_configs:
-        scenario = make_persona_extreme_scenario(archetype, speed, delay)
-        agents = make_fn()
-        print(f"  [{completed+1}/{total}] {scenario.scenario_id} ...", flush=True)
-        await run_scenario(scenario, agents, llm_client=client, runs_dir=RUNS_DIR, verbose=True)
-        completed += 1
-
-    # ── 3. Model capability isolation ───────────────────────────────────────
-    print(f"\n[Experiment 3/4] MODEL ISOLATION — ALL HAIKU  (2 runs)")
-    original_threshold = strategies.LARGE_PORTFOLIO_USD
-    strategies.LARGE_PORTFOLIO_USD = 999_999_999.0
-    try:
-        for speed, delay in [
-            (ScenarioSpeed.AI_SPEED,    0.0),
-            (ScenarioSpeed.HUMAN_SPEED, 90.0),
-        ]:
-            scenario = make_model_isolation_scenario(speed, delay)
-            agents = make_all_agents()
-            print(f"  [{completed+1}/{total}] {scenario.scenario_id} ...", flush=True)
-            await run_scenario(scenario, agents, llm_client=client, runs_dir=RUNS_DIR, verbose=True)
-            completed += 1
-    finally:
-        strategies.LARGE_PORTFOLIO_USD = original_threshold
-
-    # ── 4. Low-credibility extension ────────────────────────────────────────
-    print(f"\n[Experiment 4/4] LOW-CREDIBILITY EXTENSION  (3 runs)")
-    for cred in LOW_CRED_LEVELS:
-        scenario = make_low_cred_scenario(cred)
-        agents = make_all_agents()
-        print(f"  [{completed+1}/{total}] {scenario.scenario_id} ...", flush=True)
-        await run_scenario(scenario, agents, llm_client=client, runs_dir=RUNS_DIR, verbose=True)
-        completed += 1
 
     print(f"\n{sep}")
-    print(f"  ALL {total} EXPERIMENTS COMPLETE")
+    print("  LANGUAGE SWEEP COMPLETE")
     print(sep)
     print(client.format_cost_summary())
 
 
+async def _run_all(client: LLMClient) -> None:
+    await run_latency_sweep(client)
+    await run_language_sweep(client)
+
+
 if __name__ == "__main__":
-    asyncio.run(run_all())
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Run bank-run experiments")
+    parser.add_argument(
+        "experiment",
+        nargs="?",
+        default="latency",
+        choices=["latency", "language", "all"],
+        help="Which sweep to run (default: latency)",
+    )
+    args = parser.parse_args()
+
+    client = LLMClient()
+    if args.experiment == "latency":
+        asyncio.run(run_latency_sweep(client))
+    elif args.experiment == "language":
+        asyncio.run(run_language_sweep(client))
+    else:
+        asyncio.run(_run_all(client))

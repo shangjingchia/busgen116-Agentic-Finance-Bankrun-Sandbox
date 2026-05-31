@@ -35,6 +35,27 @@ _SCENARIO_LABELS = {
     "rumor_weak_true":      "Weak rumor — bank really is failing",
 }
 
+# Curated demo runs shown in the main dropdown, in presentation order.
+# Key: (scenario_id, speed).  Value: human-readable label.
+_FEATURED_RUNS = {
+    ("rumor_high_false",        "ai"):    "Strong rumor · Bank healthy · AI speed",
+    ("rumor_high_false",        "human"): "Strong rumor · Bank healthy · Human speed",
+    ("rumor_high_true",         "ai"):    "Strong rumor · Bank failing · AI speed",
+    ("rumor_high_true",         "human"): "Strong rumor · Bank failing · Human speed",
+    ("rumor_moderate_false",    "ai"):    "Moderate rumor · Bank healthy · AI speed",
+    ("rumor_moderate_false",    "human"): "Moderate rumor · Bank healthy · Human speed",
+    ("rumor_weak_false",        "ai"):    "Weak rumor · Bank healthy · AI speed",
+    ("rumor_weak_false",        "human"): "Weak rumor · Bank healthy · Human speed",
+    ("rumor_weak_true",         "ai"):    "Weak rumor · Bank failing · AI speed",
+    ("rumor_weak_true",         "human"): "Weak rumor · Bank failing · Human speed",
+    ("sweep_false_045",         "ai"):    "Cascade scenario · 45% credibility · Bank healthy · AI speed",
+    ("sweep_false_045",         "human"): "Cascade scenario · 45% credibility · Bank healthy · Human speed",
+    ("sweep_false_045_llm_cb",  "ai"):    "AI Central Bank · Cascade scenario · 45% credibility",
+    ("sweep_false_045_rule_cb", "ai"):    "Rule-based CB · Cascade scenario · 45% credibility",
+    ("rumor_high_true_llm_cb",  "ai"):    "AI Central Bank · Strong rumor · Bank failing",
+    ("rumor_high_true_rule_cb", "ai"):    "Rule-based CB · Strong rumor · Bank failing",
+}
+
 
 def _format_run_stem(stem: str) -> str:
     """Turn a raw filename stem into a readable label."""
@@ -66,6 +87,19 @@ def _format_run_stem(stem: str) -> str:
         parts_out = [cred_label + cb_badge, speed]
         return "  ·  ".join(p for p in parts_out if p)
 
+    if stem.startswith("sweep_latency_"):
+        # e.g. sweep_latency_000_ai or sweep_latency_100_hum
+        _LATENCY_LABELS = {
+            "000": "Latency sweep — AI speed (~1–3s)",
+            "050": "Latency sweep — 0.5× human (~2–5s)",
+            "100": "Latency sweep — 1.0× human (natural)",
+            "200": "Latency sweep — 2.0× human (slow)",
+            "400": "Latency sweep — 4.0× human (very slow)",
+        }
+        parts = stem.split("_")
+        bucket = next((p for p in parts if p.isdigit() and len(p) == 3), "")
+        return _LATENCY_LABELS.get(bucket, f"Latency sweep {bucket}")
+
     return stem
 
 
@@ -83,7 +117,13 @@ def _load_run_file(path: Path) -> None:
 
 
 def render_configure() -> None:
-    st.header("Presets")
+    st.markdown(
+        '<h1 style="font-size:1.6rem;font-weight:900;letter-spacing:-0.02em;'
+        'color:#1A1A2E;margin-bottom:0.1rem">Presets</h1>'
+        '<p style="font-size:0.88rem;color:#777;margin-top:0;margin-bottom:1rem">'
+        'Load a pre-computed run for an instant demo, or generate a new one with live LLM calls.</p>',
+        unsafe_allow_html=True,
+    )
 
     from src.scenarios.presets import PRESETS
 
@@ -114,10 +154,43 @@ def render_configure() -> None:
                 "then reload this page."
             )
         else:
+            # Build index: (scenario_id, speed) -> latest path (oldest-first so newer overwrites).
+            # Sandbox runs carry a unique scenario_id each, so they are never deduped away.
+            _run_index = {}
+            _label_by_path = {}   # friendly labels for custom sandbox runs
+            for p in sorted(saved, key=lambda x: x.stat().st_mtime):
+                try:
+                    d = json.loads(p.read_text(encoding="utf-8"))
+                    sid = d.get("scenario_id", "")
+                    spd = d.get("speed", "")
+                    if sid and spd in ("ai", "human"):
+                        _run_index[(sid, spd)] = p
+                        if sid.startswith("custom_"):
+                            nm = d.get("scenario_name") or d.get("name") or "Custom run"
+                            spd_lbl = "AI speed" if spd == "ai" else "Human speed"
+                            sa = d.get("started_at", "")
+                            date_str = f"{sa[8:10]}/{sa[5:7]}/{sa[0:4]}" if len(sa) >= 10 else ""
+                            _label_by_path[p] = "  ·  ".join(
+                                x for x in [f"🧪 {nm}", spd_lbl, date_str] if x
+                            )
+                except Exception:
+                    continue
+
+            # Featured: ordered by _FEATURED_RUNS insertion order
+            _featured_items = [(k, _run_index[k]) for k in _FEATURED_RUNS if k in _run_index]
+            _featured_paths = [p for _, p in _featured_items]
+            _path_to_label = {p: _FEATURED_RUNS[k] for k, p in _featured_items}
+
+            # Research: everything not in featured
+            _research_items = sorted(
+                [(k, p) for k, p in _run_index.items() if k not in _FEATURED_RUNS],
+                key=lambda x: x[1].stat().st_mtime, reverse=True,
+            )
+
             selected_run = st.selectbox(
                 "Saved runs",
-                saved,
-                format_func=lambda p: _format_run_stem(p.stem),
+                _featured_paths,
+                format_func=lambda p: _path_to_label[p],
                 label_visibility="collapsed",
             )
 
@@ -166,9 +239,32 @@ def render_configure() -> None:
             st.markdown("")
             if st.button("Load and view →", type="primary", use_container_width=False):
                 _load_run_file(selected_run)
-                st.toast(f"Loaded — navigating to Live View")
-                st.session_state._pending_nav = "Live View"
+                st.toast("Loaded — opening Inspect")
+                st.session_state._pending_nav = "Inspect"
                 st.rerun()
+
+            # Research runs — tucked away, not needed during the demo
+            if _research_items:
+                st.markdown("")
+                with st.expander(f"Research & sweep runs ({len(_research_items)} scenarios)", expanded=False):
+                    st.caption(
+                        "Credibility sweeps, latency experiments, persona isolation runs, "
+                        "and your saved 🧪 Sandbox runs (each kept separately). "
+                        "These power the Findings charts but aren't needed for the live demo."
+                    )
+                    _res_paths = [p for _, p in _research_items]
+                    _res_run = st.selectbox(
+                        "Research runs",
+                        _res_paths,
+                        format_func=lambda p: _label_by_path.get(p) or _format_run_stem(p.stem),
+                        label_visibility="collapsed",
+                        key="research_run_select",
+                    )
+                    if st.button("Load research run →", use_container_width=False, key="load_research"):
+                        _load_run_file(_res_run)
+                        st.toast("Loaded — opening Inspect")
+                        st.session_state._pending_nav = "Inspect"
+                        st.rerun()
 
     # ── Run tab ──────────────────────────────────────────────────────────
     with run_tab:
@@ -197,7 +293,13 @@ def render_configure() -> None:
             )
 
         scenario_template = preset_scenarios[selected_idx]
-        rumor = scenario_template.rumors[0]
+        if scenario_template.rumors:
+            _rumor_content = scenario_template.rumors[0].content
+            _rumor_credibility = float(scenario_template.rumors[0].credibility)
+        else:
+            first_signal = scenario_template.signals[0]
+            _rumor_content = first_signal.content
+            _rumor_credibility = float(first_signal.base_credibility)
 
         st.markdown(
             f'<div style="background:#EDE8DF;border-left:3px solid #8A7560;'
@@ -205,7 +307,7 @@ def render_configure() -> None:
             f'line-height:1.6;margin:0.5rem 0">'
             f'{scenario_template.description}<br><br>'
             f'<span style="color:#5A4E3C;font-weight:600">Rumor agents will receive:</span><br>'
-            f'<span style="font-style:italic">&#8220;{rumor.content}&#8221;</span>'
+            f'<span style="font-style:italic">&#8220;{_rumor_content}&#8221;</span>'
             f'</div>',
             unsafe_allow_html=True,
         )
@@ -215,7 +317,7 @@ def render_configure() -> None:
             credibility = st.slider(
                 "Rumor credibility",
                 min_value=0.0, max_value=1.0,
-                value=float(rumor.credibility), step=0.05,
+                value=_rumor_credibility, step=0.05,
                 help="0 = completely unbelievable  ·  1 = absolute certainty",
             )
         with pb:
@@ -273,7 +375,12 @@ def render_configure() -> None:
             from src.core.scenario import CentralBankConfig, ScenarioSpeed
 
             s = copy.deepcopy(scenario_template)
-            s.rumors[0].credibility = credibility
+            if s.rumors:
+                s.rumors[0].credibility = credibility
+            else:
+                for sig in s.signals:
+                    if sig.alarm_level > 0:
+                        sig.base_credibility = credibility
             s.social_signal_visibility = social_visibility
             s.seed = _random.randint(0, 9999)
             s.speed = ScenarioSpeed.AI_SPEED if speed_label == "AI Speed" else ScenarioSpeed.HUMAN_SPEED
@@ -336,11 +443,11 @@ def _run_and_store(scenario) -> None:
         )
 
         st.markdown("")
-        if st.button("→ Go to Live View", type="primary"):
-            st.session_state._pending_nav = "Live View"
+        if st.button("→ Inspect agent reasoning", type="primary"):
+            st.session_state._pending_nav = "Inspect"
             st.rerun()
 
     except Exception as exc:
         progress.empty()
         status.error(f"Simulation failed: {exc}")
-        raise
+        st.stop()

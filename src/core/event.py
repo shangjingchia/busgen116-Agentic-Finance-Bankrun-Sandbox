@@ -30,6 +30,9 @@ class EventType(str, Enum):
     CENTRAL_BANK_TRIGGERED = "central_bank_triggered"
     CENTRAL_BANK_ACTED = "central_bank_acted"
     POLICY_ANNOUNCED = "policy_announced"
+    PAYMENT_DUE = "payment_due"
+    PAYMENT_EXECUTED = "payment_executed"
+    PAYMENT_FAILED = "payment_failed"
 
 
 @dataclass
@@ -190,3 +193,43 @@ class PolicyAnnounced(Event):
     announcement_text: str = ""
     source: str = "central_bank"
     cb_action_event_id: str = ""        # links back to the CentralBankActed event
+
+
+@dataclass
+class PaymentDue(Event):
+    """A scheduled payment obligation has come due; the payer must settle it."""
+
+    obligation_id: str = ""
+    payer_id: str = ""
+    payee_id: str = ""
+    amount: float = 0.0
+    kind: str = "transfer"
+    label: str = ""
+
+
+@dataclass
+class PaymentExecuted(Event):
+    """A payment settled successfully — payee received the funds."""
+
+    obligation_id: str = ""
+    payer_id: str = ""
+    payee_id: str = ""
+    amount: float = 0.0
+    kind: str = "transfer"
+    label: str = ""
+    funded_by: str = "cash"             # "cash" — paid from the payer's liquid cash
+
+
+@dataclass
+class PaymentFailed(Event):
+    """A payment could not be settled — the payer lacked accessible cash. This is
+    the contagion link: the payee's expected income does not arrive."""
+
+    obligation_id: str = ""
+    payer_id: str = ""
+    payee_id: str = ""
+    amount: float = 0.0
+    amount_short: float = 0.0           # how much the payer was short
+    kind: str = "transfer"
+    label: str = ""
+    reason: str = "insufficient_cash"   # "insufficient_cash"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from src.core.agent import (
     Agent,
     AgentState,
@@ -90,7 +92,11 @@ def test_bank_processes_withdrawal_with_fee():
     assert not result.was_queued
 
 
-def test_bank_processing_capacity_queues_excess_withdrawal():
+def test_bank_processing_capacity_is_a_continuous_token_bucket():
+    """Capacity refills continuously at `capacity` per simulation second, capped
+    at one second of burst — so withdrawals clustered at dense fractional
+    timestamps (AI speed) are throttled, not waved through by an integer-second
+    window reset."""
     bank = Bank(
         bank_id="bank_a",
         name="First Bank",
@@ -99,19 +105,28 @@ def test_bank_processing_capacity_queues_excess_withdrawal():
         reserve_ratio_target=1.0,
         withdrawal_processing_capacity=10_000.0,
     )
+    # First call: one second of burst (10_000) is available immediately.
     result = bank.process_withdrawal("a1", 50_000.0, timestamp=0.1)
     assert result.amount_debited == 10_000.0
     assert result.amount_paid_out == 9_700.0
     assert result.was_queued
     assert bank.deposits["a1"] == 90_000.0
 
-    second = bank.process_withdrawal("a1", 10_000.0, timestamp=0.2)
-    assert second.amount_paid_out == 0.0
+    # 0.05s later only 0.05 * 10_000 = 500 has refilled — the cap still binds.
+    second = bank.process_withdrawal("a1", 10_000.0, timestamp=0.15)
+    assert second.amount_debited == pytest.approx(500.0)
+    assert second.amount_paid_out == pytest.approx(485.0)
     assert second.was_queued
 
-    next_window = bank.process_withdrawal("a1", 10_000.0, timestamp=1.0)
-    assert next_window.amount_debited == 10_000.0
-    assert next_window.amount_paid_out == 9_700.0
+    # A full second later the bucket has refilled to one second of capacity.
+    later = bank.process_withdrawal("a1", 10_000.0, timestamp=1.15)
+    assert later.amount_debited == pytest.approx(10_000.0)
+    assert later.amount_paid_out == pytest.approx(9_700.0)
+
+    # Fees were tracked explicitly, separate from reserves.
+    assert bank.fees_collected == pytest.approx(
+        result.fee_paid + second.fee_paid + later.fee_paid
+    )
 
 
 def test_bank_suspends_when_reserves_exhausted():

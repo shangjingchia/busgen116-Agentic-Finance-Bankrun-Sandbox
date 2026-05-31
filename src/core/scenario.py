@@ -42,6 +42,39 @@ class BankConfig:
     withdrawal_processing_capacity: float = 1_000_000.0
     distress_threshold: float = 0.20
     suspension_threshold: float = 0.05
+    # < 1.0 = genuinely insolvent: depositors who hold through failure recover only
+    # this fraction. Solvent banks leave this at 1.0. Pair with a true rumor.
+    asset_recovery_ratio: float = 1.0
+
+
+@dataclass
+class PaymentObligation:
+    """A scheduled payment one agent owes another (rent, payroll, gig income, …).
+
+    This is the payment-contagion layer: when a bank suspends and an agent can't
+    get cash, the payments they owe fail — and the agent expecting that money
+    suffers a liquidity shock that can push them to run too. The obligation graph
+    is what carries stress between agents independently of the social feed.
+    """
+
+    obligation_id: str
+    payer_id: str                 # agent_id who must pay
+    payee_id: str                 # agent_id who receives
+    amount: float
+    due_time: float               # simulation seconds
+    kind: str = "transfer"        # "rent" | "payroll" | "gig_income" | "loan" | "transfer"
+    label: str = ""               # human-readable, e.g. "Monthly rent to landlord"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "obligation_id": self.obligation_id,
+            "payer_id": self.payer_id,
+            "payee_id": self.payee_id,
+            "amount": self.amount,
+            "due_time": self.due_time,
+            "kind": self.kind,
+            "label": self.label,
+        }
 
 
 @dataclass
@@ -82,6 +115,8 @@ class Scenario:
     # Legacy shim — old runs and presets can still provide rumors; they are converted
     # to InformationSignal objects with alarm_level=0.8 in the simulation engine.
     rumors: List[RumorConfig] = field(default_factory=list)
+    # Payment-contagion layer (optional). Empty = pure bank-run scenario.
+    obligations: List[PaymentObligation] = field(default_factory=list)
     speed: ScenarioSpeed = ScenarioSpeed.AI_SPEED
     human_speed_decision_delay_seconds: float = 90.0
     # Per-archetype deliberation multiplier applied on top of persona.deliberation_seconds

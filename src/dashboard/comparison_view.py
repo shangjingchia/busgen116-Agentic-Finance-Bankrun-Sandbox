@@ -202,6 +202,22 @@ def _render_threshold_section(paired_sweep: Dict[float, Dict]) -> None:
     max_ratio_cred = max(ratios, key=ratios.get) if ratios else None
     max_ratio = ratios[max_ratio_cred] if max_ratio_cred else None
 
+    # Headline uses the MEDIAN ratio, not the max: the AI suspension time is
+    # floored by the rumor-publish delay (~1s), so the largest ratios are an
+    # artifact of a near-zero denominator and repeat identically across several
+    # credibility levels. The median is the defensible "typical" acceleration.
+    _sorted_ratios = sorted(ratios.values())
+    if _sorted_ratios:
+        _mid = len(_sorted_ratios) // 2
+        median_ratio = (
+            _sorted_ratios[_mid]
+            if len(_sorted_ratios) % 2
+            else (_sorted_ratios[_mid - 1] + _sorted_ratios[_mid]) / 2
+        )
+        ratio_lo, ratio_hi = _sorted_ratios[0], _sorted_ratios[-1]
+    else:
+        median_ratio = ratio_lo = ratio_hi = None
+
     ai_valid = [t for t in ai_times if t is not None]
     hu_valid = [t for t in hu_times if t is not None]
 
@@ -218,12 +234,13 @@ def _render_threshold_section(paired_sweep: Dict[float, Dict]) -> None:
         help="Range across all credibility levels tested",
     )
     c3.metric(
-        "Peak speed advantage",
-        f"{max_ratio:.0f}×" if max_ratio else "—",
+        "Typical speed advantage",
+        f"{median_ratio:.0f}×" if median_ratio else "—",
         help=(
-            f"Human deliberation was {max_ratio:.0f}× slower than AI speed "
-            f"at {max_ratio_cred:.0%} credibility"
-        ) if max_ratio and max_ratio_cred else "",
+            f"Median across credibility levels. Range {ratio_lo:.0f}×–{ratio_hi:.0f}× — "
+            f"the upper end is bounded by the rumor-publish delay (AI suspends in ~1s), "
+            f"so it reflects that floor more than signal strength."
+        ) if median_ratio else "",
     )
 
     # ── Suspension time chart (log scale) ─────────────────────────────

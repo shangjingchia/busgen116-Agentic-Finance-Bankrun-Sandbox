@@ -28,7 +28,7 @@ import json
 import logging
 import random
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -37,6 +37,7 @@ from src.core.agent import (
     Agent,
     AgentState,
     CostCategory,
+    DecisionRecord,
     OutcomeTag,
     RealizedCost,
     UnrealizedOutcome,
@@ -53,6 +54,9 @@ from src.core.event import (
     Event,
     EventType,
     InformationSignalPublished,
+    PaymentDue,
+    PaymentExecuted,
+    PaymentFailed,
     PolicyAnnounced,
     RumorPublished,
     RumorTruthRevealed,
@@ -111,6 +115,15 @@ class RunMetrics:
     cb_policy_type: Optional[str] = None   # "llm" | "rule_based" | None
     cb_action: Optional[str] = None        # action taken by the CB
     cb_triggered_at: Optional[float] = None  # simulation time when CB was triggered
+    # ---- payment-contagion metrics (0 / None when no obligations) ----
+    obligations_total: int = 0
+    payments_executed: int = 0
+    payments_failed: int = 0
+    payment_value_failed: float = 0.0
+    obligations_met_fraction: Optional[float] = None
+    time_to_first_payment_failure: Optional[float] = None
+    agents_hit_by_failed_payment: int = 0
+    payment_failure_triggered_runs: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -132,6 +145,14 @@ class RunMetrics:
             "cb_policy_type": self.cb_policy_type,
             "cb_action": self.cb_action,
             "cb_triggered_at": self.cb_triggered_at,
+            "obligations_total": self.obligations_total,
+            "payments_executed": self.payments_executed,
+            "payments_failed": self.payments_failed,
+            "payment_value_failed": self.payment_value_failed,
+            "obligations_met_fraction": self.obligations_met_fraction,
+            "time_to_first_payment_failure": self.time_to_first_payment_failure,
+            "agents_hit_by_failed_payment": self.agents_hit_by_failed_payment,
+            "payment_failure_triggered_runs": self.payment_failure_triggered_runs,
         }
 
 
@@ -195,11 +216,15 @@ class SimulationEngine:
         agents: List[Agent],
         banks: Dict[str, Bank],
         llm_client: LLMClient,
+        model_override: Optional[str] = None,
     ) -> None:
         self._scenario = scenario
         self._agents: Dict[str, Agent] = {a.agent_id: a for a in agents}
         self._banks = banks
         self._llm_client = llm_client
+        # When set, ALL agent decisions use this one model id (overriding the
+        # Haiku/Sonnet routing) — used to compare different base LLMs as delegates.
+        self._model_override = model_override
         self._rng = random.Random(scenario.seed)
 
         # Event queue (heapq)
@@ -211,8 +236,13 @@ class SimulationEngine:
         # Per-agent pending observation strings (consumed on decision trigger)
         self._pending_obs: Dict[str, List[str]] = {a.agent_id: [] for a in agents}
 
-        # Per-agent social signal accumulation
+        # Per-agent social signal accumulation.
+        # `_social_count` counts ALL observed peer signals (including holds/stays);
+        # `_withdrawal_social_count` counts only observed peer *withdrawals*. The
+        # peer-withdrawal cascade trigger and the peer summary key on the latter —
+        # observing peers who STAYED must not push an agent toward panic.
         self._social_count: Dict[str, int] = {a.agent_id: 0 for a in agents}
+        self._withdrawal_social_count: Dict[str, int] = {a.agent_id: 0 for a in agents}
         self._social_details: Dict[str, List[str]] = {a.agent_id: [] for a in agents}
         # Tiered re-decision: tracks how many threshold tiers each agent has crossed.
         # Tiers fire at 15%, 35%, 60% of peers withdrawing — at most 3 re-decisions total.
@@ -227,6 +257,24 @@ class SimulationEngine:
         self._partially_withdrawn_agents: Set[str] = set()
         self._attempted_exit_agents: Set[str] = set()
         self._paid_out_agents: Set[str] = set()
+
+        # ---- Payment-contagion layer ----
+        self._obligations = list(getattr(scenario, "obligations", []) or [])
+        # Per-agent obligation views for the decision prompt
+        self._obligations_by_payer: Dict[str, List[Any]] = {a.agent_id: [] for a in agents}
+        self._obligations_by_payee: Dict[str, List[Any]] = {a.agent_id: [] for a in agents}
+        for ob in self._obligations:
+            self._obligations_by_payer.setdefault(ob.payer_id, []).append(ob)
+            self._obligations_by_payee.setdefault(ob.payee_id, []).append(ob)
+        # Per-agent running record of payment events (for the decision context)
+        self._payment_log: Dict[str, List[str]] = {a.agent_id: [] for a in agents}
+        # Metrics
+        self._payments_executed: int = 0
+        self._payments_failed: int = 0
+        self._payment_value_failed: float = 0.0
+        self._first_payment_failure_time: Optional[float] = None
+        self._agents_hit_by_failed_payment: Set[str] = set()
+        self._payment_failure_triggered_runs: int = 0
 
         # Initial deposit totals per bank (for withdrawal-fraction metric)
         self._initial_deposits: Dict[str, float] = {
@@ -287,6 +335,19 @@ class SimulationEngine:
                 propagation_latency_seconds=signal.propagation_latency_seconds,
             )
             self._schedule(pub)
+
+        # Seed payment obligations (payment-contagion layer)
+        for ob in self._obligations:
+            self._schedule(PaymentDue(
+                event_type=EventType.PAYMENT_DUE,
+                timestamp=ob.due_time,
+                obligation_id=ob.obligation_id,
+                payer_id=ob.payer_id,
+                payee_id=ob.payee_id,
+                amount=ob.amount,
+                kind=ob.kind,
+                label=ob.label,
+            ))
 
         sim_time = 0.0
 
@@ -365,8 +426,145 @@ class SimulationEngine:
             return self._handle_central_bank_acted(event, sim_time)
         elif isinstance(event, PolicyAnnounced):
             return self._handle_policy_announced(event, sim_time)
+        elif isinstance(event, PaymentDue):
+            return self._handle_payment_due(event, sim_time)
         # WithdrawalProcessed and BankReserveUpdated appear in the log only.
         return []
+
+    def _handle_payment_due(self, event: PaymentDue, sim_time: float) -> List[Event]:
+        """Settle a payment from the payer's liquid cash. If the payer lacks cash
+        (because their bank suspended and they couldn't withdraw), the payment
+        FAILS — and the payee's expected income never arrives, triggering a
+        liquidity-shock re-decision. That is the contagion mechanic."""
+        payer = self._agents.get(event.payer_id)
+        payee = self._agents.get(event.payee_id)
+        if payer is None or payee is None:
+            return []
+
+        new_events: List[Event] = []
+        cash = payer.portfolio.get(_CASH_KEY, 0.0)
+        label = event.label or event.kind
+        payer_bank_id = self._primary_bank_for(payer)
+        payer_bank = self._banks.get(payer_bank_id) if payer_bank_id else None
+        accessible_bank = (
+            payer_bank.available_for_payment(payer.agent_id) if payer_bank else 0.0
+        )
+        accessible = cash + accessible_bank
+
+        if accessible + 1e-9 >= event.amount:
+            # Settle: draw from liquid cash first, then debit the bank deposit
+            # (fee-free routine payment) for the remainder.
+            from_cash = min(cash, event.amount)
+            payer.portfolio[_CASH_KEY] = cash - from_cash
+            remaining = event.amount - from_cash
+            if remaining > 1e-9 and payer_bank is not None:
+                debited = payer_bank.debit_for_payment(payer.agent_id, remaining)
+                dkey = f"{payer_bank_id}:deposit"
+                payer.portfolio[dkey] = max(0.0, payer.portfolio.get(dkey, 0.0) - debited)
+                new_events.append(BankReserveUpdated(
+                    event_type=EventType.BANK_RESERVE_UPDATED,
+                    timestamp=sim_time,
+                    bank_id=payer_bank_id,
+                    new_reserves=payer_bank.reserves,
+                    new_reserve_ratio=payer_bank.reserve_ratio(),
+                    new_state=payer_bank.state.value,
+                ))
+            payee.portfolio[_CASH_KEY] = payee.portfolio.get(_CASH_KEY, 0.0) + event.amount
+            if payer.outcome_ledger is not None:
+                payer.outcome_ledger.principal_current_value = payer.total_wealth()
+            if payee.outcome_ledger is not None:
+                payee.outcome_ledger.principal_current_value = payee.total_wealth()
+            self._payments_executed += 1
+            self._payment_log[event.payer_id].append(
+                f"T+{sim_time:.0f}s: you PAID ${event.amount:,.0f} ({label}) to {payee.persona.name}."
+            )
+            self._payment_log[event.payee_id].append(
+                f"T+{sim_time:.0f}s: you RECEIVED ${event.amount:,.0f} ({label}) from {payer.persona.name}."
+            )
+            new_events.append(PaymentExecuted(
+                event_type=EventType.PAYMENT_EXECUTED,
+                timestamp=sim_time,
+                obligation_id=event.obligation_id,
+                payer_id=event.payer_id,
+                payee_id=event.payee_id,
+                amount=event.amount,
+                kind=event.kind,
+                label=event.label,
+                funded_by="cash",
+            ))
+            return new_events
+
+        # Payment fails — payer cannot access enough funds (bank suspended or
+        # reserves/deposit drained). This is the contagion trigger.
+        short = event.amount - accessible
+        self._payments_failed += 1
+        self._payment_value_failed += short
+        self._agents_hit_by_failed_payment.add(event.payee_id)
+        if self._first_payment_failure_time is None:
+            self._first_payment_failure_time = sim_time
+        if payer.outcome_ledger is not None:
+            payer.outcome_ledger.realized_costs.append(
+                RealizedCost(
+                    timestamp=sim_time,
+                    cost_category=CostCategory.CASH_FLOW_DISRUPTION,
+                    amount=0.0,  # not a principal loss — a missed obligation
+                    decision_event_id=event.event_id,
+                    description=(
+                        f"Could not make ${event.amount:,.0f} {label} payment to "
+                        f"{payee.persona.name} — short ${short:,.0f} of accessible cash."
+                    ),
+                )
+            )
+        self._payment_log[event.payer_id].append(
+            f"T+{sim_time:.0f}s: you COULD NOT PAY ${event.amount:,.0f} ({label}) to "
+            f"{payee.persona.name} — your cash is locked up."
+        )
+        self._payment_log[event.payee_id].append(
+            f"T+{sim_time:.0f}s: expected ${event.amount:,.0f} ({label}) from "
+            f"{payer.persona.name} DID NOT ARRIVE."
+        )
+        new_events.append(PaymentFailed(
+            event_type=EventType.PAYMENT_FAILED,
+            timestamp=sim_time,
+            obligation_id=event.obligation_id,
+            payer_id=event.payer_id,
+            payee_id=event.payee_id,
+            amount=event.amount,
+            amount_short=short,
+            kind=event.kind,
+            label=event.label,
+            reason="insufficient_cash",
+        ))
+
+        # Contagion: the payee just lost expected income → liquidity-shock
+        # re-decision (they may now run to cover their own obligations).
+        if payee.state != AgentState.WITHDRAWN:
+            payee_deposit_bank = self._primary_bank_for(payee)
+            if payee_deposit_bank is not None:
+                self._payment_failure_triggered_runs += 1
+                self._pending_obs[event.payee_id].append(
+                    f"A payment you were counting on — ${event.amount:,.0f} ({label}) "
+                    f"from {payer.persona.name} — failed to arrive. You may need cash to "
+                    f"meet your own obligations."
+                )
+                delay = self._decision_delay(payee)
+                new_events.append(AgentDecisionTriggered(
+                    event_type=EventType.AGENT_DECISION_TRIGGERED,
+                    timestamp=sim_time + delay,
+                    agent_id=event.payee_id,
+                    trigger_reason="payment_failure",
+                    triggering_event_id=event.event_id,
+                    bank_id=payee_deposit_bank,
+                ))
+        return new_events
+
+    def _primary_bank_for(self, agent: Agent) -> Optional[str]:
+        """The bank holding the agent's largest deposit (their run target)."""
+        best_bank, best_amt = None, 0.0
+        for key, amt in agent.portfolio.items():
+            if key.endswith(":deposit") and amt > best_amt:
+                best_bank, best_amt = key.split(":", 1)[0], amt
+        return best_bank
 
     def _handle_rumor_published(self, event: RumorPublished) -> List[Event]:
         # Store so observers can look it up later
@@ -434,9 +632,13 @@ class SimulationEngine:
             obs_str = render_social_observation(original, observer_arch)
             self._social_details[event.agent_id].append(obs_str)
             self._social_count[event.agent_id] += 1
+            is_withdrawal_signal = original.action in ("partial_withdraw", "full_withdraw")
+            if is_withdrawal_signal:
+                self._withdrawal_social_count[event.agent_id] += 1
 
             # Tiered re-decision: fire each time this persona crosses their
-            # next social threshold.
+            # next peer-WITHDRAWAL threshold. Holds/stays are observed (and shown
+            # in the peer summary) but do not advance the panic tier.
             total_others = len(self._agents) - 1
             current_tier = self._re_decided_tier[event.agent_id]
             base_threshold = agent.persona.peer_action_reconsideration_threshold
@@ -445,11 +647,12 @@ class SimulationEngine:
                 for offset in _RETRIGGER_TIER_OFFSETS
             )
             if (
-                current_tier < len(retrigger_tiers)
+                is_withdrawal_signal
+                and current_tier < len(retrigger_tiers)
                 and agent.state != AgentState.WITHDRAWN
             ):
                 next_frac = retrigger_tiers[current_tier]
-                if self._social_count[event.agent_id] >= next_frac * max(total_others, 1):
+                if self._withdrawal_social_count[event.agent_id] >= next_frac * max(total_others, 1):
                     self._re_decided_tier[event.agent_id] = current_tier + 1
                     delay = self._decision_delay(agent)
                     trigger = AgentDecisionTriggered(
@@ -564,12 +767,16 @@ class SimulationEngine:
         if remaining <= 0.0:
             agent.state = AgentState.WITHDRAWN
             self._withdrawn_agents.add(agent.agent_id)
-            frac_withdrawn = len(self._withdrawn_agents) / len(self._agents)
-            if frac_withdrawn >= 0.50 and self._time_to_50pct is None:
-                self._time_to_50pct = event.timestamp
         else:
             agent.state = AgentState.HAS_DECIDED
             self._partially_withdrawn_agents.add(agent.agent_id)
+
+        # time_to_50pct_withdrawn = when half the population has pulled ANY money
+        # (full or partial). Keying it on exact-zero balances meant it almost never
+        # fired, because most agents partial-withdraw or get capacity-throttled.
+        frac_acted = len(self._attempted_exit_agents) / len(self._agents)
+        if frac_acted >= 0.50 and self._time_to_50pct is None:
+            self._time_to_50pct = event.timestamp
 
         focus_initial = self._initial_deposits.get(event.bank_id, 0.0)
         if focus_initial > 0:
@@ -766,6 +973,7 @@ class SimulationEngine:
 
         peer_summary = self._build_peer_summary(event.agent_id)
         prior_summary = self._build_prior_summary(agent)
+        payment_summary = self._build_payment_context(event.agent_id, event.timestamp)
 
         context = DecisionContext(
             bank_id_in_focus=event.bank_id,
@@ -774,6 +982,7 @@ class SimulationEngine:
             trigger_reason=event.trigger_reason,
             peer_action_summary=peer_summary,
             prior_decision_summary=prior_summary,
+            payment_context=payment_summary,
         )
 
         logger.info(
@@ -784,9 +993,43 @@ class SimulationEngine:
             event.timestamp,
         )
 
-        record = await asyncio.to_thread(
-            make_decision, agent, context, llm_client=self._llm_client
-        )
+        try:
+            _mo = self._model_override
+            _kw = {"haiku_model": _mo, "sonnet_model": _mo} if _mo else {}
+            record = await asyncio.to_thread(
+                make_decision, agent, context, llm_client=self._llm_client, **_kw
+            )
+        except Exception as exc:  # noqa: BLE001 — never let one bad call kill the run
+            # A malformed/failed LLM response (after the client's own retries)
+            # must not abort the whole simulation mid-demo. Degrade this agent to
+            # a logged "hold" so the run completes and the failure is auditable.
+            logger.warning(
+                "Decision for agent=%s failed (%s); defaulting to hold",
+                agent.agent_id,
+                exc,
+            )
+            record = DecisionRecord(
+                decision_id=DecisionRecord.new_id(),
+                agent_id=agent.agent_id,
+                timestamp=event.timestamp,
+                trigger_reason=event.trigger_reason,
+                action="hold",
+                bank_id=context.bank_id_in_focus,
+                amount_fraction=None,
+                reasoning=f"[decision unavailable — LLM call failed: {exc}]",
+                confidence=0.0,
+                model_used="fallback",
+                prompt_tokens=0,
+                completion_tokens=0,
+                cost_usd=0.0,
+                cache_hit=False,
+                system_prompt="",
+                user_message="",
+                raw_tool_input={"action": "hold", "error": str(exc)},
+                portfolio_snapshot=dict(agent.portfolio),
+                observation_summary=list(context.observations),
+            )
+            agent.decision_history.append(record)
 
         acted = AgentActed(
             event_type=EventType.AGENT_ACTED,
@@ -811,6 +1054,13 @@ class SimulationEngine:
 
     def _finalize(self, sim_time: float) -> None:
         """Reveal rumor truth, tag agent outcomes, compute unrealized outcomes."""
+        # Snapshot deposits BEFORE any insolvency haircut. The withdrawal-fraction
+        # metric must measure deposits that agents WITHDREW during the run, not
+        # principal written down by the end-of-run insolvency haircut — otherwise a
+        # true-insolvency run shows a large "withdrawal fraction" even if nobody ran.
+        self._deposits_at_finalize: Dict[str, float] = {
+            bid: bank.total_deposits() for bid, bank in self._banks.items()
+        }
         # Build a unified list of (target_bank_id, is_true) from both rumors and signals.
         # For signals, use the first signal per bank to determine is_true.
         truth_by_bank: dict[str, bool] = {}
@@ -829,6 +1079,38 @@ class SimulationEngine:
 
         for rumor in unified_rumors if unified_rumors else self._scenario.rumors:
             bank = self._banks.get(rumor.target_bank_id)
+
+            # Real economics: if the rumor was TRUE and the bank is genuinely
+            # insolvent (asset_recovery_ratio < 1), wind it up and crystallize
+            # losses for whoever still holds deposits. This makes "the bank really
+            # failed" mechanically real — held principal is actually destroyed —
+            # so the IGNORED_REAL_WARNING tag and net_principal_change agree.
+            crystallized_losses: Dict[str, float] = {}
+            if rumor.is_true and bank is not None:
+                crystallized_losses = bank.apply_insolvency_haircut()
+                for agent_id, loss in crystallized_losses.items():
+                    agent = self._agents.get(agent_id)
+                    if agent is None or agent.outcome_ledger is None or loss <= 0:
+                        continue
+                    deposit_key = f"{rumor.target_bank_id}:deposit"
+                    agent.portfolio[deposit_key] = max(
+                        0.0, agent.portfolio.get(deposit_key, 0.0) - loss
+                    )
+                    agent.outcome_ledger.realized_costs.append(
+                        RealizedCost(
+                            timestamp=sim_time,
+                            cost_category=CostCategory.LOCKED_IN_LOSS,
+                            amount=loss,
+                            decision_event_id="finalization",
+                            description=(
+                                f"Lost ${loss:,.0f} held at {rumor.target_bank_id} "
+                                f"through its insolvency (recovered "
+                                f"{bank.asset_recovery_ratio:.0%} on the dollar)."
+                            ),
+                        )
+                    )
+                    agent.outcome_ledger.principal_current_value = agent.total_wealth()
+
             truth = RumorTruthRevealed(
                 event_type=EventType.RUMOR_TRUTH_REVEALED,
                 timestamp=sim_time,
@@ -863,22 +1145,23 @@ class SimulationEngine:
                         tag = OutcomeTag.PARTIAL_RESPONSE
                     else:
                         tag = OutcomeTag.IGNORED_REAL_WARNING
-                        # Record counterfactual loss
-                        if bank is not None:
-                            deposit_at_risk = agent.deposit_at_bank(rumor.target_bank_id)
-                            if deposit_at_risk > 0:
-                                agent.outcome_ledger.unrealized_outcomes.append(
-                                    UnrealizedOutcome(
-                                        timestamp=sim_time,
-                                        decision_event_id="finalization",
-                                        outcome_type="would_have_lost",
-                                        amount=deposit_at_risk,
-                                        description=(
-                                            f"Held ${deposit_at_risk:,.0f} at {rumor.target_bank_id} "
-                                            f"through a real insolvency event."
-                                        ),
-                                    )
+                        # The loss is now REALIZED (crystallized above). Record it
+                        # as a realized counterfactual marker so the inspect view's
+                        # principal plot and the tag tell the same story.
+                        realized_loss = crystallized_losses.get(agent.agent_id, 0.0)
+                        if realized_loss > 0:
+                            agent.outcome_ledger.unrealized_outcomes.append(
+                                UnrealizedOutcome(
+                                    timestamp=sim_time,
+                                    decision_event_id="finalization",
+                                    outcome_type="would_have_lost",
+                                    amount=realized_loss,
+                                    description=(
+                                        f"Held ${realized_loss:,.0f} (now lost) at "
+                                        f"{rumor.target_bank_id} through a real insolvency."
+                                    ),
                                 )
+                            )
                 else:
                     total_fees = agent.outcome_ledger.total_realized_cost()
                     if withdrew_fully or withdrew_partially:
@@ -957,15 +1240,42 @@ class SimulationEngine:
         if count == 0:
             return None
         total_others = len(self._agents) - 1
-        pct = int(count / max(total_others, 1) * 100)
+        withdrew = self._withdrawal_social_count.get(agent_id, 0)
+        stayed = max(0, count - withdrew)
+        pct = int(withdrew / max(total_others, 1) * 100)
         summary = (
-            f"You have observed {count} of {total_others} other depositors "
-            f"({pct}%) making withdrawals."
+            f"You have observed {withdrew} of {total_others} other depositors "
+            f"({pct}%) make withdrawals"
         )
+        if stayed:
+            summary += f", and {stayed} choose to stay"
+        summary += "."
         recent = self._social_details.get(agent_id, [])[-2:]
         if recent:
             summary += " Most recently: " + " ".join(recent)
         return summary
+
+    def _build_payment_context(self, agent_id: str, sim_time: float) -> Optional[str]:
+        """Summarize the agent's payment situation for the decision prompt:
+        obligations they still owe, and recent payments/failures they're involved in."""
+        parts: List[str] = []
+        upcoming = [
+            ob for ob in self._obligations_by_payer.get(agent_id, [])
+            if ob.due_time >= sim_time
+        ]
+        if upcoming:
+            upcoming = sorted(upcoming, key=lambda o: o.due_time)[:3]
+            obs = "; ".join(
+                f"${o.amount:,.0f} {o.label or o.kind} due in {max(0, o.due_time - sim_time):.0f}s"
+                for o in upcoming
+            )
+            parts.append(f"Payments you still owe: {obs}. You need accessible cash to make these.")
+        recent = self._payment_log.get(agent_id, [])[-3:]
+        if recent:
+            parts.append("Recent payment activity: " + " ".join(recent))
+        if not parts:
+            return None
+        return " ".join(parts)
 
     def _build_prior_summary(self, agent: Agent) -> Optional[str]:
         if not agent.decision_history:
@@ -1000,7 +1310,15 @@ class SimulationEngine:
             focus_bank_id = None
         if focus_bank_id and self._initial_deposits.get(focus_bank_id, 0) > 0:
             initial = self._initial_deposits[focus_bank_id]
-            current = self._banks[focus_bank_id].total_deposits() if focus_bank_id in self._banks else initial
+            # Use deposits at finalize-time (before the insolvency haircut) so the
+            # write-down of a failed bank's deposits is not counted as withdrawals.
+            snapshot = getattr(self, "_deposits_at_finalize", {})
+            if focus_bank_id in snapshot:
+                current = snapshot[focus_bank_id]
+            elif focus_bank_id in self._banks:
+                current = self._banks[focus_bank_id].total_deposits()
+            else:
+                current = initial
             withdrawal_fraction = max(0.0, (initial - current) / initial)
         else:
             withdrawal_fraction = 0.0
@@ -1026,6 +1344,17 @@ class SimulationEngine:
             cb_policy_type=self._cb_policy_type,
             cb_action=self._cb_action,
             cb_triggered_at=self._cb_triggered_at,
+            obligations_total=len(self._obligations),
+            payments_executed=self._payments_executed,
+            payments_failed=self._payments_failed,
+            payment_value_failed=self._payment_value_failed,
+            obligations_met_fraction=(
+                self._payments_executed / len(self._obligations)
+                if self._obligations else None
+            ),
+            time_to_first_payment_failure=self._first_payment_failure_time,
+            agents_hit_by_failed_payment=len(self._agents_hit_by_failed_payment),
+            payment_failure_triggered_runs=self._payment_failure_triggered_runs,
         )
 
         return RunResult(
@@ -1083,6 +1412,7 @@ def build_banks(scenario: Scenario, agents: List[Agent]) -> Dict[str, Bank]:
             early_withdrawal_fee_rate=bc.early_withdrawal_fee_rate,
             distress_threshold=bc.distress_threshold,
             suspension_threshold=bc.suspension_threshold,
+            asset_recovery_ratio=getattr(bc, "asset_recovery_ratio", 1.0),
         )
     return banks
 
@@ -1099,14 +1429,19 @@ async def run_scenario(
     llm_client: LLMClient,
     runs_dir: Optional[Path] = None,
     verbose: bool = True,
+    model_override: Optional[str] = None,
 ) -> RunResult:
-    """Build banks, run the engine, optionally save, print cost summary."""
+    """Build banks, run the engine, optionally save, print cost summary.
+
+    model_override: if set, every agent decision uses this one model id (instead
+    of the Haiku/Sonnet routing) — used to compare base LLMs as delegates."""
     banks = build_banks(scenario, agents)
     engine = SimulationEngine(
         scenario=scenario,
         agents=agents,
         banks=banks,
         llm_client=llm_client,
+        model_override=model_override,
     )
     result = await engine.run()
 
@@ -1258,9 +1593,6 @@ def _setup_logging(verbose: bool) -> None:
 
 
 if __name__ == "__main__":
-    import os
-    import sys
-
     try:
         from dotenv import load_dotenv
 
@@ -1296,7 +1628,6 @@ if __name__ == "__main__":
 
     _setup_logging(args.debug)
 
-    from src.decisions.llm_client import LLMClient
     from src.personas.instances import make_all_agents
 
     speed = ScenarioSpeed.AI_SPEED if args.speed == "ai" else ScenarioSpeed.HUMAN_SPEED

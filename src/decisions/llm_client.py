@@ -175,6 +175,7 @@ class LLMClient:
         pricing: Optional[Dict[str, Tuple[float, float]]] = None,
         http_referer: Optional[str] = None,
         x_title: Optional[str] = None,
+        request_timeout_seconds: float = 60.0,
     ):
         try:
             from openai import OpenAI  # type: ignore
@@ -198,10 +199,15 @@ class LLMClient:
         if title:
             default_headers["X-Title"] = title
 
+        # Explicit per-request timeout. The SDK default is 600s, so a single hung
+        # call could freeze a run (and a live demo) for ten minutes before retrying.
+        # A tight timeout fails fast → our retry loop (or the engine's hold-fallback)
+        # keeps the simulation moving.
         self._client = OpenAI(
             api_key=resolved_key,
             base_url=base_url,
             default_headers=default_headers or None,
+            timeout=request_timeout_seconds,
         )
         self._max_retries = max_retries
         self._initial_backoff = initial_backoff_seconds

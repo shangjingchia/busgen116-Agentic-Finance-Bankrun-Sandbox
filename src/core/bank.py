@@ -51,11 +51,30 @@ class Bank:
     state: BankState = BankState.HEALTHY
     early_withdrawal_fee_rate: float = 0.03
 
+    # Cents-on-the-dollar that depositors recover if the bank is wound up. A
+    # solvent bank is 1.0 (deposits fully backed by assets, even if not all are
+    # liquid right now). A genuinely INSOLVENT bank is < 1.0 — its assets are
+    # worth less than its liabilities, so depositors who hold through the failure
+    # take a real principal loss. This is separate from reserve_ratio, which only
+    # measures how much can be paid out *immediately* (and drives suspension).
+    asset_recovery_ratio: float = 1.0
+
     # State stamps populated by the engine
     distress_threshold: float = field(default=0.20)   # ratio below which bank is distressed
     suspension_threshold: float = field(default=0.05) # ratio below which bank suspends
-    _capacity_window_second: Optional[int] = field(default=None, init=False, repr=False)
-    _capacity_used_in_window: float = field(default=0.0, init=False, repr=False)
+
+    # Fees collected from early withdrawals. Tracked explicitly so the fee does
+    # not silently distort the reserve/deposit accounting (it is bank income, not
+    # a depositor liability and not part of payable reserves).
+    fees_collected: float = 0.0
+
+    # Continuous token-bucket capacity meter. The old integer-second window reset
+    # the budget on every whole second, so at AI speed (withdrawals clustered at
+    # dense fractional timestamps) the cap almost never bound. The bucket refills
+    # continuously at withdrawal_processing_capacity per simulation second and is
+    # capped at one second's worth of burst.
+    _capacity_bucket: Optional[float] = field(default=None, init=False, repr=False)
+    _last_refill_time: float = field(default=0.0, init=False, repr=False)
 
     def total_deposits(self) -> float:
         return sum(self.deposits.values())
@@ -108,14 +127,16 @@ class Bank:
         requested_gross = min(amount_requested, self.deposits[agent_id])
         capacity_remaining = requested_gross
         if timestamp is not None and self.withdrawal_processing_capacity >= 0:
-            window_second = int(timestamp)
-            if self._capacity_window_second != window_second:
-                self._capacity_window_second = window_second
-                self._capacity_used_in_window = 0.0
-            capacity_remaining = max(
-                0.0,
-                self.withdrawal_processing_capacity - self._capacity_used_in_window,
-            )
+            cap = self.withdrawal_processing_capacity
+            if self._capacity_bucket is None:
+                # Start with one second's worth of burst available.
+                self._capacity_bucket = cap
+                self._last_refill_time = timestamp
+            else:
+                elapsed = max(0.0, timestamp - self._last_refill_time)
+                self._capacity_bucket = min(cap, self._capacity_bucket + elapsed * cap)
+                self._last_refill_time = timestamp
+            capacity_remaining = max(0.0, self._capacity_bucket)
 
         gross = min(requested_gross, capacity_remaining)
         capacity_limited = gross < requested_gross
@@ -144,6 +165,7 @@ class Bank:
             actual_fee = actual_gross - actually_paid
             self.deposits[agent_id] -= actual_gross
             self.reserves -= actually_paid
+            self.fees_collected += actual_fee
             result = WithdrawalResult(
                 amount_requested=amount_requested,
                 amount_paid_out=actually_paid,
@@ -155,6 +177,7 @@ class Bank:
         else:
             self.deposits[agent_id] -= gross
             self.reserves -= net_to_agent
+            self.fees_collected += fee
             result = WithdrawalResult(
                 amount_requested=amount_requested,
                 amount_paid_out=net_to_agent,
@@ -164,9 +187,56 @@ class Bank:
                 new_bank_state=self._recompute_state(),
             )
 
-        if timestamp is not None:
-            self._capacity_used_in_window += result.amount_debited
+        if timestamp is not None and self._capacity_bucket is not None:
+            self._capacity_bucket = max(0.0, self._capacity_bucket - result.amount_debited)
         return result
+
+    def available_for_payment(self, agent_id: str) -> float:
+        """Cash the agent could pull right now to settle a routine payment.
+        Zero if the bank is suspended — which is exactly how a bank run breaks the
+        payment chain. Bounded by both the agent's deposit and the bank's reserves."""
+        if self.state == BankState.SUSPENDED:
+            return 0.0
+        return max(0.0, min(self.deposits.get(agent_id, 0.0), self.reserves))
+
+    def debit_for_payment(self, agent_id: str, amount: float) -> float:
+        """Move `amount` out of the agent's deposit to settle a routine scheduled
+        payment. No early-withdrawal fee (this is a bill payment, not a panic
+        exit). Returns the amount actually debited."""
+        if self.state == BankState.SUSPENDED or amount <= 0:
+            return 0.0
+        debit = max(0.0, min(amount, self.deposits.get(agent_id, 0.0), self.reserves))
+        if debit <= 0:
+            return 0.0
+        self.deposits[agent_id] -= debit
+        self.reserves -= debit
+        self._recompute_state()
+        return debit
+
+    def apply_insolvency_haircut(self) -> Dict[str, float]:
+        """Crystallize losses for remaining depositors when the bank is genuinely
+        insolvent (asset_recovery_ratio < 1.0). Used at finalize when a *true*
+        rumor's bank is wound up. Each remaining deposit is written down to its
+        recovery value; returns {agent_id: loss_amount} so the engine can post the
+        loss to ledgers.
+
+        This is what makes a 'real crisis' mechanically real rather than a label:
+        an agent who held through a true insolvency actually loses principal,
+        while an agent who got out earlier kept theirs.
+        """
+        recovery = max(0.0, min(1.0, self.asset_recovery_ratio))
+        if recovery >= 1.0:
+            return {}
+        losses: Dict[str, float] = {}
+        for agent_id, deposit in list(self.deposits.items()):
+            if deposit <= 0:
+                continue
+            recovered = deposit * recovery
+            loss = deposit - recovered
+            if loss > 0:
+                losses[agent_id] = loss
+                self.deposits[agent_id] = recovered
+        return losses
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -179,6 +249,8 @@ class Bank:
             "state": self.state.value,
             "reserve_ratio": self.reserve_ratio(),
             "total_deposits": self.total_deposits(),
+            "fees_collected": self.fees_collected,
+            "asset_recovery_ratio": self.asset_recovery_ratio,
             "early_withdrawal_fee_rate": self.early_withdrawal_fee_rate,
             "distress_threshold": self.distress_threshold,
             "suspension_threshold": self.suspension_threshold,

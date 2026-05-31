@@ -170,8 +170,9 @@ def _build_cb_user_message(
         f"  Reserve ratio:   {bank_reserve_ratio:.1%}\n\n"
         f"Cascade dynamics:\n"
         f"  Fully withdrawn: {withdrawn_count}/{total_agents} agents "
-        f"({cascade_fraction:.0%} of depositors)\n"
-        f"  Trigger threshold: {trigger_threshold:.0%} just crossed\n\n"
+        f"({withdrawn_count / max(total_agents, 1):.0%} of depositors)\n"
+        f"  Reserves drawn down: {cascade_fraction:.0%} of starting reserves "
+        f"(trigger threshold {trigger_threshold:.0%} just crossed)\n\n"
         f"Your decision: intervene, and if so, how?"
     )
 
