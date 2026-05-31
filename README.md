@@ -20,34 +20,39 @@ Two reasons.
 
 ## How it works
 
-Twelve agents, four personas, two banks. An event-driven simulation engine processes a configurable scenario. Agents make decisions through LLM calls — Claude Haiku for routine decisions, Claude Sonnet for high-stakes moments. Each decision produces a structured action plus reasoning, all logged with full audit trails.
+Twelve agents, four personas, two banks. An event-driven simulation engine processes a configurable scenario. Agents make decisions through real LLM calls, accessed via OpenRouter's OpenAI-compatible API so the underlying model is swappable — a cheaper model for routine decisions, a stronger one for high-stakes moments. Each decision produces a structured action plus reasoning, all logged with full audit trails.
 
 Each persona has a `cost_function`: a structured description of what the agent's principal stands to lose or miss from different decisions, framed in qualitative terms (catastrophic, significant, moderate, minor). A cautious retiree reasons knowing that principal loss is catastrophic but missed upside is minor; an aggressive trader has the inverse weighting; a gig worker treats short-term cash flow disruption as catastrophic. This makes agents reason with stakes, not just opine. Outcomes are tracked in a per-agent ledger — fees paid, losses crystallized, upside missed, crises avoided — which renders in the dashboard and grounds the demo's quantitative claims.
 
-The empirical headline is the AI-vs-human delta. Every preset scenario runs at both AI speed (no decision latency, the natural mode of the system) and human speed (decision delays calibrated to observed human decision timescales from the bank run literature). We measure how much faster, larger, and more easily triggered AI-mediated runs are than human-mediated runs in the same scenario. The human-speed baseline is anchored to established empirical findings (Iyer-Puri 2012 on network effects in Indian bank runs; post-SVB analyses for institutional run dynamics; Goldstein-Pauzner theoretical foundations) — not to reproduce any specific historical event but to ensure the human-speed simulation produces patterns consistent with what's been observed. The delta between the AI-speed and human-speed runs is the headline finding.
+The headline finding is about **model identity**. Holding everything else fixed — the same twelve personas, the same rumor about the same *healthy* bank, the same information feed — and changing only *which* underlying model makes the decisions swings the outcome dramatically: under one model about half the depositors run on a bank that is fine, under another every one of them does. A population of delegates that all run on the same model behaves like a monoculture that panics — or holds — in lockstep, which makes the model itself a systemic risk factor.
 
-The Streamlit dashboard has three views:
+A second finding is the AI-vs-human speed delta. Every preset runs at both AI speed (no decision latency, the natural mode of the system) and human speed (a calibrated deliberation delay standing in for the time a person needs to notice and decide). AI delegation reaches the halfway point of a run roughly 3× faster; because payouts are rate-limited, the faster request wave also freezes the bank sooner and locks more depositors out. The human-speed baseline is anchored qualitatively to the bank run literature (Iyer-Puri 2012 on network effects; post-SVB analyses; Goldstein-Pauzner foundations) — not to reproduce any specific event, but to keep the human-speed patterns plausible.
 
-- **Configure:** pick a scenario preset, adjust parameters (rumor credibility, persona mix, bank reserves, social signal visibility), press run.
-- **Live:** watch the simulation unfold as a force-directed agent-bank graph with a scrolling event timeline and aggregate metrics.
-- **Inspect:** click any agent, see their persona, portfolio, full decision history, and the LLM's reasoning behind each decision.
+The Streamlit dashboard has four pages:
 
-The presentation flow is: configure a bank run → watch it happen → pause → click an interesting agent → read what the AI was thinking when it decided to start running on the bank.
+- **Presets:** load a saved run, or configure and launch a new scenario (rumor credibility, persona mix, bank reserves, social-signal visibility, regulator, counter-signal).
+- **Inspect:** click any agent to see their persona, portfolio, full decision history, and the verbatim LLM reasoning behind each decision.
+- **Findings:** the patterns that held up across runs — model monoculture, speed, and language sensitivity — each with a headline number and an honest caveat.
+- **Sandbox:** build a scenario from scratch — describe agents in plain English, set bank health and population mix, write the rumor, add a regulator or counter-signal, then run and save it.
+
+The presentation flow is: load a bank run → click an agent and read what the AI was thinking when it decided to run on the bank → walk the findings.
 
 ## Stack
 
-Python 3.11+, Anthropic Python SDK (Claude Haiku for most calls, Claude Sonnet for strategic moments), `asyncio` for parallel LLM calls, custom event-driven loop with `heapq`, Streamlit + Plotly for the dashboard, NetworkX for the agent-bank graph.
+Python 3.11+, LLM access via OpenRouter (OpenAI-compatible API) so the underlying model is swappable across providers — which is what powers the model-comparison finding; `asyncio` for parallel LLM calls, a custom event-driven loop with `heapq`, and Streamlit + Plotly for the dashboard.
 
 ## Status
 
-Project in active development for a course final, four-week build culminating in a live competition-format presentation in front of class judges. The only deliverable is the live ~8-minute demo and Q&A. There is no formal writeup. See `PLAN.md` for the build sequence and `architecture.md` for technical design.
+Built for a course final, culminating in a live competition-format presentation in front of class judges. The deliverable is a live 5–7 minute demo and Q&A; there is no formal writeup.
+
+**Presentation materials** (in this repo): `SLIDES.pptx` (the deck, with speaker notes and a Q&A appendix), `PRESENTATION_SCRIPT_TIGHT.md` (the delivery script), `PRESENTATION_SCRIPT.md` (full script with Q&A prep and backup-slide map), and `DEMO_DAY_RUNBOOK.md` (how to run the demo). See `PLAN.md` for the build sequence and `architecture.md` for technical design.
 
 ## What this project does *not* claim
 
 - It does not predict real bank run behavior. The agents are LLM personas, not models of real depositors.
 - It does not produce calibrated forecasts of future financial system dynamics. It produces controlled experiments.
 - It does not reproduce specific historical events (SVB, Northern Rock, 2008 individual failures). The empirical literature is used as qualitative anchoring for the human-speed baseline, not as a reproduction target.
-- The headline AI-vs-human delta is a property of *our simulation* — it characterizes what changes when the same scenario runs with and without artificial decision latency. It is not a prediction of how AI bank runs will play out in real markets.
+- The headline findings — the effect of model identity and the AI-vs-human speed delta — are properties of *our simulation*. They characterize what changes when you vary the model or the decision latency in this controlled setup. They are not predictions of how AI bank runs will play out in real markets.
 
 ## Scope
 
