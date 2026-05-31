@@ -27,3 +27,6 @@ runs/*/
 
 # Claude Code project files
 .claude/
+
+# Scratch / build artifacts from slide tooling
+_pptx_extract/

@@ -37,6 +37,25 @@ The Streamlit dashboard has four pages:
 
 The presentation flow is: load a bank run → click an agent and read what the AI was thinking when it decided to run on the bank → walk the findings.
 
+## Quickstart
+
+Requires Python 3.11+.
+
+```bash
+# 1. Install (editable, into a virtualenv)
+python -m venv .venv
+# Windows:        .\.venv\Scripts\Activate.ps1
+# macOS / Linux:  source .venv/bin/activate
+pip install -e .
+
+# 2. Launch the dashboard
+streamlit run src/dashboard/app.py
+```
+
+A browser opens at `http://localhost:8501`. **No API key is needed to explore** — go to **Presets → Load saved run** and the dashboard reads the pre-computed simulations in `runs/`, including every reasoning trail.
+
+To launch *new* live simulations (Sandbox page, or new preset runs), copy `.env.example` to `.env` and add an `OPENROUTER_API_KEY`. Routine agent decisions default to a cheap model and a full run costs roughly $1; see `CLAUDE.md` for the cost model. Run the test suite with `pytest`. Demo-running details are in `DEMO_DAY_RUNBOOK.md`.
+
 ## Stack
 
 Python 3.11+, LLM access via OpenRouter (OpenAI-compatible API) so the underlying model is swappable across providers — which is what powers the model-comparison finding; `asyncio` for parallel LLM calls, a custom event-driven loop with `heapq`, and Streamlit + Plotly for the dashboard.
