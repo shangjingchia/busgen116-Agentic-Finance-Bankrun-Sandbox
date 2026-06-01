@@ -160,6 +160,13 @@ with st.sidebar:
     else:
         st.caption("No run yet — go to Presets.")
 
+    st.divider()
+    st.caption(
+        "Built by **Shang Jing Chia** · Stanford GSB · BUSGEN 116  \n"
+        "[View source on GitHub]"
+        "(https://github.com/shangjingchia/busgen116-Agentic-Finance-Bankrun-Sandbox)"
+    )
+
 # ---------------------------------------------------------------------------
 # Page routing
 # ---------------------------------------------------------------------------
