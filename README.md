@@ -1,5 +1,7 @@
 # Agentic Bank Run Sandbox
 
+**🔗 Live demo:** https://busgen116-agentic-finance-bankrun-sandbox.streamlit.app/ — explore the pre-saved runs, inspect each agent's reasoning, and walk the findings. No setup required; live runs are disabled on the hosted demo (see [Quickstart](#quickstart) to run them locally).
+
 A controlled simulation environment for studying how a population of LLM-powered AI agents — each acting as a financial delegate for a simulated retail user — behaves under stress.
 
 ## What this is
