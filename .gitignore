@@ -12,8 +12,11 @@ __pycache__/
 dist/
 build/
 
-# Local Streamlit state
-.streamlit/
+# Local Streamlit state — ignore everything EXCEPT the theme config,
+# which must be committed so the deployed app matches local appearance.
+# (secrets.toml stays ignored — never commit API keys.)
+.streamlit/*
+!.streamlit/config.toml
 
 # Generated simulation runs (kept out of git; data lives on the runner's disk)
 runs/*/
