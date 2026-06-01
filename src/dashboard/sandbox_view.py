@@ -279,8 +279,17 @@ def _section_agent_builder() -> None:
 
 
 def _generate_and_preview(description: str, deposit_a: float, deposit_b: float) -> None:
+    import os
     from dotenv import load_dotenv
     load_dotenv()
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        st.warning(
+            "⚠️ Persona generation is disabled on this hosted demo — no `OPENROUTER_API_KEY` "
+            "is configured. Browse the pre-saved agents and runs instead. "
+            "(To generate new personas, clone the repo and run locally with your own key.)"
+        )
+        return
 
     from src.decisions.llm_client import LLMClient
     from src.personas.generator import generate_persona, persona_to_save_dict
@@ -726,8 +735,17 @@ def _run_sandbox(
     selected_agents: List[Dict[str, Any]],
     scenario_config: Dict[str, Any],
 ) -> None:
+    import os
     from dotenv import load_dotenv
     load_dotenv()
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        st.warning(
+            "⚠️ Live runs are disabled on this hosted demo — no `OPENROUTER_API_KEY` is "
+            "configured. Explore the pre-saved simulations on the **Presets** page instead. "
+            "(To launch new runs, clone the repo and run locally with your own key.)"
+        )
+        return
 
     from src.core.scenario import (
         AgentPopulationGroup,

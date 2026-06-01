@@ -403,8 +403,17 @@ def render_configure() -> None:
 
 
 def _run_and_store(scenario) -> None:
+    import os
     from dotenv import load_dotenv
     load_dotenv()
+
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        st.warning(
+            "⚠️ Live runs are disabled on this hosted demo — no `OPENROUTER_API_KEY` is "
+            "configured. Explore the pre-saved simulations via **📂 Load saved run** above. "
+            "(To launch new runs, clone the repo and run locally with your own key.)"
+        )
+        return
 
     from src.core.simulation import run_scenario
     from src.decisions.llm_client import LLMClient

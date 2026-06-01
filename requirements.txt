@@ -1,0 +1,9 @@
+# Runtime dependencies for the Streamlit Community Cloud deploy.
+# Mirrors [project].dependencies in pyproject.toml — keep them in sync.
+# (Streamlit Cloud installs from this file; it does not build the setuptools package.)
+openai>=1.50.0
+streamlit>=1.40.0
+plotly>=5.24.0
+networkx>=3.4.0
+pydantic>=2.9.0
+python-dotenv>=1.0.0
